@@ -70,6 +70,9 @@ else
 fi
 
 mkdir -p "$DATA_DIR/agent-logs"
+# The container runs as sweeper (UID 1000). Chown so it can write the SQLite DB
+# and agent logs onto the bind-mounted volume.
+chown -R 1000:1000 "$DATA_DIR"
 
 # ── 3. Swapfile ───────────────────────────────────────────────────────────────
 SWAPFILE=/swapfile

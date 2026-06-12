@@ -63,10 +63,15 @@ RUN npm install -g @anthropic-ai/claude-code@2.1.175
 
 COPY --from=builder /dependabot-sweeper /usr/local/bin/dependabot-sweeper
 
-# Runs as root. Accepted trade-off for this single-purpose, single-tenant VM:
-# the worker must write the SQLite DB and clone repos onto a root-owned
-# bind-mounted disk, so a non-root user would require coordinating host volume
-# ownership. Dropping to a non-root user (with a chowned data dir) is a planned
-# hardening step to validate during a real deploy, not before.
+# Switch to the non-root `node` user that already exists in this base image
+# (UID/GID 1000, home /home/node). Required so the claude CLI accepts
+# --dangerously-skip-permissions. The startup script must chown /var/lib/sweeper
+# on the host to UID 1000 before starting containers (see startup-script.sh step 2).
+USER node
+
+# Git identity for any commit operations the impl agent performs during rebases.
+RUN git config --global user.name "dependabot-sweeper" \
+    && git config --global user.email "dependabot-sweeper@noreply.github.com"
+
 # The subcommand (worker / web) is chosen per-service in compose.yaml.
 ENTRYPOINT ["/usr/local/bin/dependabot-sweeper"]

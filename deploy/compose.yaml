@@ -26,6 +26,12 @@ services:
       - --interval=30m
       - --concurrency=2      # keep memory bounded on e2-small (2 GB RAM + 2 GB swap)
       - --accept-author=${ACCEPT_AUTHOR}
+      # Test-bed (petemoore/taskcluster fork) structural failures unrelated to the bump,
+      # treated as non-blocking so the tool can triage the real signal: CodeQL re-flags
+      # pre-existing fork vulnerabilities on large dep diffs; meta-tests is a fork-only
+      # meta check. Revisit/parameterise before pointing this deployment at production.
+      - --ignore-check=CodeQL
+      - --ignore-check=meta-tests
     env_file:
       - path: /run/sweeper/.env
         required: false  # written to tmpfs by startup-script.sh on the VM; absent on dev machines

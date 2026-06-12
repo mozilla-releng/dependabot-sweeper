@@ -1,0 +1,16 @@
+# Build output
+/dependabot-sweeper
+
+# Dev SQLite database
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+
+# Node (SPA dev tooling — dist/ is committed; node_modules/ is generated)
+internal/web/ui/node_modules/
+
+# macOS
+.DS_Store

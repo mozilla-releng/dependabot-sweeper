@@ -1,0 +1,58 @@
+# Docker Compose for dependabot-sweeper on GCE.
+#
+# Both services use the same image and share a bind-mounted data directory
+# at /var/lib/sweeper (backed by a persistent GCE data disk).  The SQLite DB
+# and agent logs live there.
+#
+# Required environment variables (set in the IMAGE meta-var on the VM or
+# exported before running compose):
+#
+#   IMAGE          — full AR image reference, e.g.
+#                    europe-west1-docker.pkg.dev/PROJECT/sweeper/dependabot-sweeper:latest
+#   REPO           — owner/repo to watch, e.g. "myorg/myrepo"
+#   ACCEPT_AUTHOR  — GitHub login(s) whose dependabot PRs to accept (space-separated)
+#
+# Secrets are loaded from /var/lib/sweeper/.env (written by the startup script
+# from GCP Secret Manager — see startup-script.sh).
+
+services:
+  worker:
+    image: ${IMAGE}
+    command:
+      - worker
+      - --repos=${REPO}
+      - --db=/var/lib/sweeper/sweeper.db
+      - --log-dir=/var/lib/sweeper/agent-logs
+      - --interval=30m
+      - --concurrency=2      # keep memory bounded on e2-small (2 GB RAM + 2 GB swap)
+      - --accept-author=${ACCEPT_AUTHOR}
+    env_file:
+      - path: /run/sweeper/.env
+        required: false  # written to tmpfs by startup-script.sh on the VM; absent on dev machines
+    volumes:
+      - /var/lib/sweeper:/var/lib/sweeper
+    restart: unless-stopped
+    logging:
+      driver: journald
+      options:
+        tag: sweeper-worker
+
+  web:
+    image: ${IMAGE}
+    command:
+      - web
+      - --listen-addr=0.0.0.0:8080   # binds 0.0.0.0 inside the container...
+      - --db=/var/lib/sweeper/sweeper.db
+      - --log-dir=/var/lib/sweeper/agent-logs
+    env_file:
+      - path: /run/sweeper/.env
+        required: false  # written to tmpfs by startup-script.sh on the VM; absent on dev machines
+    volumes:
+      - /var/lib/sweeper:/var/lib/sweeper
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    logging:
+      driver: journald
+      options:
+        tag: sweeper-web

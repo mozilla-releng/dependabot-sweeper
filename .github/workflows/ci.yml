@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The Go binary embeds the built SPA via //go:embed all:ui/dist, so the UI
+      # must be built before any go build/vet/test/staticcheck step.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: internal/web/ui/package-lock.json
+      - name: Build UI
+        working-directory: internal/web/ui
+        run: |
+          npm ci
+          npm run build
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l ./cmd ./internal)
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: staticcheck
+        uses: dominikh/staticcheck-action@v1
+        with:
+          version: "2026.1"

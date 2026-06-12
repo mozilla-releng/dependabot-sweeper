@@ -1,0 +1,12 @@
+# Keep the build context small and reproducible. The image build produces its
+# own ui/dist (Node stage) and Go binary, so exclude local build artifacts and
+# anything that shouldn't influence the image.
+.git
+**/node_modules
+internal/web/ui/dist
+/dependabot-sweeper
+*.db
+*.db-shm
+*.db-wal
+.env
+.DS_Store

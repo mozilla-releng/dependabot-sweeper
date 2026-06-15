@@ -292,6 +292,16 @@ type Pipeline struct {
 	workdir  string
 	store    progress.Writer // optional; nil for the one-shot `review` command
 	logDir   string          // directory for per-PR agent JSONL logs; defaults to $TMPDIR/sweeper-agent-logs
+
+	// bumpTipSHA is the branch's actual tip SHA captured in cloneAndBranch right
+	// after `checkout -b branch pr.HeadRef`, before the worker runs — i.e. the
+	// *post-rebase* bump commit. It is the single canonical base for the squash
+	// (T9), the reviewer diff, and the gave_up skip key. NEVER use the scan-time
+	// pr.HeadSHA for these: a Phase-0 rebase rewrites the branch head, so the
+	// scan-time SHA is stale and would (a) bundle every unrelated `main` change
+	// merged since the branch's original base into the "fix" commit (T9) and
+	// (b) make the gave_up SHA-skip miss next cycle, re-entering the agent (N4).
+	bumpTipSHA string
 }
 
 // NewPipeline creates a new implementation pipeline.
@@ -346,13 +356,28 @@ type RunResult struct {
 	Detail        string
 	ReviewVerdict *models.ReviewVerdict
 	Branch        string
+
+	// TipSHA is the post-rebase bump-commit tip captured in cloneAndBranch (the
+	// canonical base; see Pipeline.bumpTipSHA). The orchestrator's gave_up path
+	// records its terminal outcome against THIS SHA, not the scan-time
+	// pr.HeadSHA, so the next scan's SHA-skip fires on the rebased head instead
+	// of re-entering the agent (N4 / MAJOR-1). Empty if cloneAndBranch never ran
+	// (e.g. an early clone/rebase failure — those return GaveUp=false anyway).
+	TipSHA string
 }
 
 // Run executes the full implementation pipeline.
-func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *models.AgentAnalysis) RunResult {
+//
+// The return is named so a single defer can stamp TipSHA (the captured
+// post-rebase bump tip) onto every exit path — the orchestrator's gave_up path
+// needs it to record the terminal outcome at the rebased head (N4 / MAJOR-1).
+// It is empty until cloneAndBranch captures it, which is fine: the paths that
+// return before then are transient (GaveUp=false) and stay keyed on pr.HeadSHA.
+func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *models.AgentAnalysis) (result RunResult) {
 	branch := BuildBranchName(pr.PackageName, pr.NewVersion)
 	p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageImplStarting, "")
 	defer p.cleanup()
+	defer func() { result.TipSHA = p.bumpTipSHA }()
 
 	// Phase 0: Ensure the PR branch is up to date with base.
 	//
@@ -520,8 +545,11 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		}
 
 		// Review gate. CI is acceptable; have the reviewer judge the change.
-		diff := p.getBranchDiff(ctx, repoDir, pr.HeadRef)
-		commits := p.getBranchCommits(ctx, repoDir, pr.HeadRef)
+		// Diff/commits are taken relative to the captured post-rebase bump tip —
+		// the agent's own work — not origin/<HeadRef>, which is mis-based and can
+		// read empty/wrong once the worker force-pushes (M4 / MINOR-1).
+		diff := p.getBranchDiff(ctx, repoDir, p.bumpTipSHA)
+		commits := p.getBranchCommits(ctx, repoDir, p.bumpTipSHA)
 		messages := make([]string, len(commits))
 		for i, c := range commits {
 			messages[i] = c.Message
@@ -545,8 +573,11 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 
 		if verdict.Verdict == "approve" {
 			// Deterministic finalize: collapse the agent's multi-turn history into a
-			// single "fix:" commit on top of the dependabot commit (pr.HeadSHA),
-			// preserving the two-commit structure: bump commit + agent fix commit.
+			// single "fix:" commit on top of the *post-rebase* bump commit
+			// (p.bumpTipSHA), preserving the two-commit structure: bump commit +
+			// agent fix commit. Using the captured tip (not the stale scan-time
+			// pr.HeadSHA) is the T9 fix — otherwise the squash bundles every
+			// unrelated `main` change merged since the branch's base into the fix.
 			var agentMsg string
 			if pr.Grouped {
 				agentMsg = fmt.Sprintf("fix: update code for %s compatibility", pr.PackageName)
@@ -554,7 +585,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 				agentMsg = fmt.Sprintf("fix: update code for %s %s → %s compatibility",
 					pr.PackageName, pr.OldVersion, pr.NewVersion)
 			}
-			if err := p.squashBranch(ctx, repoDir, pr.HeadSHA, branch, agentMsg); err != nil {
+			if err := p.squashBranch(ctx, repoDir, p.bumpTipSHA, branch, agentMsg); err != nil {
 				slog.Error("Squash of impl branch failed", "pr", pr.Number, "error", err)
 				return RunResult{
 					Success:       false,
@@ -838,11 +869,25 @@ func (p *Pipeline) cloneAndBranch(ctx context.Context, pr models.DependabotPR, b
 		return "", fmt.Errorf("git checkout failed: %w\n%s", err, out)
 	}
 
+	// Capture the branch's actual tip SHA NOW — before the worker runs — as the
+	// canonical post-rebase bump commit (the T9 fix). This is the single base
+	// the squash and the reviewer diff reset against, and the SHA the gave_up
+	// path records its outcome at. It must come from the live checkout, never
+	// from the stale scan-time pr.HeadSHA (which a Phase-0 rebase rewrites).
+	tip, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "", fmt.Errorf("git rev-parse HEAD (capturing bump tip): %w", err)
+	}
+	p.bumpTipSHA = strings.TrimSpace(string(tip))
+	if p.bumpTipSHA == "" {
+		return "", fmt.Errorf("captured an empty bump-tip SHA after checkout of %s", pr.HeadRef)
+	}
+
 	// Configure git identity for the bot account
 	exec.Command("git", "-C", repoDir, "config", "user.name", p.config.BotName).Run()
 	exec.Command("git", "-C", repoDir, "config", "user.email", p.config.BotEmail).Run()
 
-	slog.Info("Created branch from dependabot head", "branch", branch, "headRef", pr.HeadRef)
+	slog.Info("Created branch from dependabot head", "branch", branch, "headRef", pr.HeadRef, "bumpTip", p.bumpTipSHA)
 	return repoDir, nil
 }
 
@@ -1093,10 +1138,15 @@ func (p *Pipeline) verifyCI(ctx context.Context, branch string, ignored map[stri
 	return last, false
 }
 
-func (p *Pipeline) getBranchDiff(ctx context.Context, repoDir, baseRef string) string {
+// getBranchDiff returns the agent's net change as a diff against baseSHA (the
+// captured post-rebase bump tip), i.e. baseSHA...HEAD. baseSHA is a concrete
+// commit, not a ref name, so it is stable across the worker's force-pushes —
+// unlike the old origin/<HeadRef>, which is mis-based and goes empty/wrong once
+// the branch is force-pushed (M4 / MINOR-1).
+func (p *Pipeline) getBranchDiff(ctx context.Context, repoDir, baseSHA string) string {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "diff", fmt.Sprintf("origin/%s...HEAD", baseRef)).Output()
+	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "diff", fmt.Sprintf("%s...HEAD", baseSHA)).Output()
 	if err != nil {
 		return ""
 	}
@@ -1107,10 +1157,12 @@ func (p *Pipeline) getBranchDiff(ctx context.Context, repoDir, baseRef string) s
 	return s
 }
 
-func (p *Pipeline) getBranchCommits(ctx context.Context, repoDir, baseRef string) []models.CommitInfo {
+// getBranchCommits lists the agent's commits on top of baseSHA (the captured
+// post-rebase bump tip), baseSHA..HEAD, surfaced to the reviewer.
+func (p *Pipeline) getBranchCommits(ctx context.Context, repoDir, baseSHA string) []models.CommitInfo {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "log", "--oneline", fmt.Sprintf("origin/%s..HEAD", baseRef)).Output()
+	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "log", "--oneline", fmt.Sprintf("%s..HEAD", baseSHA)).Output()
 	if err != nil {
 		return nil
 	}
@@ -1134,15 +1186,17 @@ func (p *Pipeline) getBranchCommits(ctx context.Context, repoDir, baseRef string
 }
 
 // squashBranch squashes the agent's multi-turn commit history into a single
-// "fix:" commit on top of dependabotSHA, then force-pushes. This preserves the
-// two-commit structure (dependabot bump + agent fix) so reviewers can see what
-// the agent changed independently of the version bump. If the agent made no net
-// changes, the second commit is skipped and only the dependabot commit is pushed.
-func (p *Pipeline) squashBranch(ctx context.Context, repoDir, dependabotSHA, branch, agentMessage string) error {
-	// Stage all agent changes relative to the dependabot commit.
-	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "reset", "--soft", dependabotSHA).CombinedOutput()
+// "fix:" commit on top of bumpTipSHA (the captured post-rebase bump commit),
+// then force-pushes. This preserves the two-commit structure (bump + agent fix)
+// so reviewers can see what the agent changed independently of the version
+// bump. If the agent made no net changes, the second commit is skipped and only
+// the bump commit is pushed. bumpTipSHA MUST be the live post-rebase tip (T9):
+// the stale scan-time pr.HeadSHA would bundle unrelated `main` changes here.
+func (p *Pipeline) squashBranch(ctx context.Context, repoDir, bumpTipSHA, branch, agentMessage string) error {
+	// Stage all agent changes relative to the post-rebase bump commit.
+	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "reset", "--soft", bumpTipSHA).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git reset --soft %s: %w: %s", dependabotSHA, err, out)
+		return fmt.Errorf("git reset --soft %s: %w: %s", bumpTipSHA, err, out)
 	}
 	// Only commit if there are staged changes (agent may have made no net changes).
 	if checkCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "diff", "--cached", "--quiet"); checkCmd.Run() != nil {
@@ -1156,7 +1210,7 @@ func (p *Pipeline) squashBranch(ctx context.Context, repoDir, dependabotSHA, bra
 	if out, err = push.CombinedOutput(); err != nil {
 		return fmt.Errorf("force-push: %w: %s", err, out)
 	}
-	slog.Info("Squashed agent commits onto dependabot commit", "branch", branch, "dependabotSHA", dependabotSHA)
+	slog.Info("Squashed agent commits onto bump commit", "branch", branch, "bumpTipSHA", bumpTipSHA)
 	return nil
 }
 

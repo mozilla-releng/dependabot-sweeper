@@ -56,8 +56,7 @@ Your job is to verify the implementation is correct and honest.
 Respond with a JSON object:
 {
   "verdict": "approve" or "request_changes",
-  "concerns": ["list of specific concerns, empty if none"],
-  "summary": "Brief summary of what was implemented and your assessment (2-4 sentences, for the PR body)"
+  "concerns": ["list of specific concerns, empty if none"]
 }
 
 Respond ONLY with the JSON object, no other text.
@@ -205,7 +204,6 @@ func (r *Reviewer) ParseResponse(rawText string) (*models.ReviewVerdict, error) 
 	var data struct {
 		Verdict  string   `json:"verdict"`
 		Concerns []string `json:"concerns"`
-		Summary  string   `json:"summary"`
 	}
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
 		return nil, &ReviewError{Message: fmt.Sprintf("failed to parse reviewer response: %v", err)}
@@ -218,6 +216,5 @@ func (r *Reviewer) ParseResponse(rawText string) (*models.ReviewVerdict, error) 
 	return &models.ReviewVerdict{
 		Verdict:  data.Verdict,
 		Concerns: data.Concerns,
-		Summary:  data.Summary,
 	}, nil
 }

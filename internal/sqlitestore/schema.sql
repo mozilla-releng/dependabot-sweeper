@@ -15,7 +15,6 @@ CREATE TABLE IF NOT EXISTS pr_progress (
     old_version    TEXT    NOT NULL DEFAULT '',
     new_version    TEXT    NOT NULL DEFAULT '',
     ecosystem      TEXT    NOT NULL DEFAULT '',
-    budget_spent   REAL    NOT NULL DEFAULT 0,
 
     -- CI aggregate counts (v2; checks detail in ci_checks table)
     ci_state       TEXT    NOT NULL DEFAULT '',

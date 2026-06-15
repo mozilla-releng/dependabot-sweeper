@@ -15,7 +15,6 @@
     ...(pr.impl_branch   ? [{ label: 'Branch',       value: pr.impl_branch,   mono: true }] : []),
     ...(pr.worktree_path ? [{ label: 'Worktree',      value: pr.worktree_path, mono: true }] : []),
     ...(pr.session_id    ? [{ label: 'Session',       value: pr.session_id,   mono: true }] : []),
-    ...(pr.budget_spent  ? [{ label: 'Agent spend',   value: `$${pr.budget_spent.toFixed(4)}` }] : []),
     ...(pr.replacement_pr ? [{ label: 'Replacement PR', value: `#${pr.replacement_pr}` }] : []),
   ])
 </script>

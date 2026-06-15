@@ -78,9 +78,6 @@ func TestParseResponse_Approve(t *testing.T) {
 	if len(verdict.Concerns) != 0 {
 		t.Errorf("concerns = %v, want empty", verdict.Concerns)
 	}
-	if verdict.Summary != "Changes look correct" {
-		t.Errorf("summary = %q, want %q", verdict.Summary, "Changes look correct")
-	}
 }
 
 func TestParseResponse_RequestChanges(t *testing.T) {
@@ -132,8 +129,5 @@ func TestParseResponse_StripsCodeFences(t *testing.T) {
 
 	if verdict.Verdict != "approve" {
 		t.Errorf("verdict = %q, want %q", verdict.Verdict, "approve")
-	}
-	if verdict.Summary != "All good" {
-		t.Errorf("summary = %q, want %q", verdict.Summary, "All good")
 	}
 }

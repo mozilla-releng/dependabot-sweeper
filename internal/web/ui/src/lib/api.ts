@@ -86,7 +86,6 @@ export interface PRProgress {
   ecosystem?: string
   ci?: CIStatus
   analysis?: AgentAnalysis
-  budget_spent?: number
   // Terminal outcome idempotency (v3): set once a PR reaches a terminal stage.
   head_sha?: string
   outcome?: string

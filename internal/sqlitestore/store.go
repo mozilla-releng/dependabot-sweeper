@@ -309,7 +309,7 @@ func (s *Store) Get(prNumber int) (models.PRProgress, bool) {
 	row := s.db.QueryRow(`
 		SELECT pr_number, package_name, bump_type, stage,
 		       session_id, worktree_path, impl_branch, replacement_pr, last_updated,
-		       old_version, new_version, ecosystem, budget_spent,
+		       old_version, new_version, ecosystem,
 		       ci_state, ci_total, ci_passed, ci_failed, ci_pending, analysis_json,
 		       head_sha, outcome
 		FROM pr_progress WHERE pr_number=?`, prNumber)
@@ -337,7 +337,7 @@ func (s *Store) All() []models.PRProgress {
 	rows, err := s.db.Query(`
 		SELECT pr_number, package_name, bump_type, stage,
 		       session_id, worktree_path, impl_branch, replacement_pr, last_updated,
-		       old_version, new_version, ecosystem, budget_spent,
+		       old_version, new_version, ecosystem,
 		       ci_state, ci_total, ci_passed, ci_failed, ci_pending, analysis_json,
 		       head_sha, outcome
 		FROM pr_progress ORDER BY pr_number`)
@@ -437,7 +437,7 @@ func scanProgress(row scanner) (models.PRProgress, error) {
 	err := row.Scan(
 		&p.PRNumber, &p.PackageName, &p.BumpType, &stageStr,
 		&p.SessionID, &p.WorktreePath, &p.ImplBranch, &replPR, &nanos,
-		&p.OldVersion, &p.NewVersion, &p.Ecosystem, &p.BudgetSpent,
+		&p.OldVersion, &p.NewVersion, &p.Ecosystem,
 		&ciState, &ciTotal, &ciPassed, &ciFailed, &ciPending, &analysisJSON,
 		&p.HeadSHA, &p.Outcome,
 	)

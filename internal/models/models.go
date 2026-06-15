@@ -311,7 +311,6 @@ type CodeChangeEntry struct {
 type ReviewVerdict struct {
 	Verdict  string   `json:"verdict"` // "approve" or "request_changes"
 	Concerns []string `json:"concerns"`
-	Summary  string   `json:"summary"`
 }
 
 // CommitInfo is a commit on the implementation branch, surfaced to the reviewer.
@@ -417,10 +416,6 @@ type PRProgress struct {
 	// Analysis is the analyser verdict. nil until SetAnalysis is called (i.e.
 	// not yet populated for PRs that are skipped without being analysed).
 	Analysis *AgentAnalysis `json:"analysis,omitempty"`
-
-	// BudgetSpent is the agent's total USD spend for this PR across all worker
-	// turns. 0 means "unknown" (not yet tracked end-to-end; stretch goal).
-	BudgetSpent float64 `json:"budget_spent,omitempty"`
 
 	// HeadSHA and Outcome record the last terminal outcome for this PR (Bug #23).
 	// When non-empty, the next scan at the same HeadSHA skips re-processing via

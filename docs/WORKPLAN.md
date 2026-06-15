@@ -7,6 +7,13 @@ the commit/PR.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a maintainer decision first.
 
+> **Status (2026-06-15): PRs #1–#6 are MERGED into `main`** — Phase 0 (validated), Phase 1 (#1),
+> Phase 2 (#2), and the independent Phase-3 items Q12 (#3), Q5/Q6 (#4), Q7 (#5), Q14 (#6). `main`
+> is green (build/test/gofmt/staticcheck). Still open: the **analyser-removal cluster**
+> (3.0/3.2/3.2b/3.3/3.6/3.8 — agentic, needs a verified env; plan below), **Phase 4** (UI, needs a
+> browser session), and the **Phase 5** two-PR-lifecycle doc (lands with the cluster). See
+> `docs/questions.md` for the two maintainer decisions.
+
 ---
 
 ## Locked decisions (the direction)
@@ -78,7 +85,7 @@ repo). Tick the phase when its items below are done.
   Confirm T9 on #193; run the empty-commit-PR test. See *Validation experiments* below.
   **Done 2026-06-15** — both confirmed; T9 confirmed with a richer-than-expected picture (a
   `-X theirs` rebase-pollution component, flagged in `docs/questions.md`).
-- [x] **Phase 1 — Safe independent fixes** (low risk, no design dependencies). **PR #1 (draft).**
+- [x] **Phase 1 — Safe independent fixes** (low risk, no design dependencies). **PR #1 (merged).**
   T4 stale comment ✓; T6/T6a **reporting-noise fix only** (no-op cycle records nothing) ✓ — the
   transition guard is deferred to Phase 3 per review C2. Dead fields (`ReviewVerdict.Summary`,
   `BudgetSpent`) **deliberately deferred** to their owning phases (Summary → Q15/Phase 3.8 replaces
@@ -87,7 +94,7 @@ repo). Tick the phase when its items below are done.
   field** `Pipeline.bumpTipSHA` reused by the squash and the reviewer-diff — review M4 ✓; **also
   returned in `RunResult.TipSHA`** and the orchestrator's gave_up path records the outcome (+ sticky
   comment marker) against it via `terminalSHA()` — review N4/MAJOR-1 ✓; all other `recordOutcome`
-  calls left on `pr.HeadSHA`). **PR #2 (draft).** ⚠️ Phase-0 surfaced a `-X theirs` rebase-pollution
+  calls left on `pr.HeadSHA`). **PR #2 (merged).** ⚠️ Phase-0 surfaced a `-X theirs` rebase-pollution
   component this narrow fix doesn't fully clean — see `docs/questions.md`.
 - [~] **Phase 3 — Core rework** (large, interrelated). _Within-phase order deviated to bank
   independent, verifiable wins first; the analyser-removal cluster (0/2/2b/3/6/8) is agentic and

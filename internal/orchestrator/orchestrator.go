@@ -549,7 +549,8 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 	// as effectively green and falls through to the normal approve/no-op path
 	// instead of being flagged for a human.
 	ignored, baseFailures := o.suppressedChecks(ctx, pr)
-	acceptable, blocking := pr.CI.AcceptableGiven(ignored, baseFailures, time.Now(), o.config.CIStaleness)
+	required := o.github.RequiredChecks(ctx, pr.BaseRef)
+	acceptable, blocking := pr.CI.AcceptableGiven(ignored, baseFailures, required, time.Now(), o.config.CIStaleness)
 	if !acceptable && analysis.Recommendation != models.RecommendNeedsChanges {
 		slog.Info("CI not acceptable but assessment doesn't say needs_changes — flagging", "pr", pr.Number, "blocking", blocking)
 		ciNote := fmt.Sprintf("\n\n**CI is failing** (%d check(s): %s). "+

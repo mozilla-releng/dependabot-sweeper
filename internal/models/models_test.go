@@ -102,6 +102,7 @@ func TestCIStatusAcceptableGiven(t *testing.T) {
 		ci           CIStatus
 		ignored      map[string]bool
 		baseFailures map[string]bool
+		required     map[string]bool // empty/nil → all-checks gating (M2)
 		wantOK       bool
 		wantBlocking []string
 	}{
@@ -176,11 +177,44 @@ func TestCIStatusAcceptableGiven(t *testing.T) {
 			baseFailures: set("go-modernize", "service-worker-manager"),
 			wantOK:       true,
 		},
+		// --- Q7: required-checks gating ---
+		{
+			// With a required set, only required checks can block; a failing
+			// non-required check is ignored entirely.
+			name:         "RequiredGatingOnlyRequiredChecksBlock",
+			ci:           ci("failure", "required-build", "optional-codeql"),
+			required:     set("required-build"),
+			wantOK:       false,
+			wantBlocking: []string{"required-build"},
+		},
+		{
+			name:     "RequiredGatingNonRequiredFailureIsAcceptable",
+			ci:       ci("failure", "optional-codeql"),
+			required: set("required-build"),
+			wantOK:   true,
+		},
+		{
+			// Empty required set must fall back to all-checks (M2) — never read an
+			// all-red PR as vacuously acceptable.
+			name:         "EmptyRequiredFallsBackToAllChecks",
+			ci:           ci("failure", "some-check"),
+			required:     nil,
+			wantOK:       false,
+			wantBlocking: []string{"some-check"},
+		},
+		{
+			// ignored still wins within the required set.
+			name:     "RequiredButIgnoredIsAcceptable",
+			ci:       ci("failure", "required-build"),
+			ignored:  set("required-build"),
+			required: set("required-build"),
+			wantOK:   true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ok, blocking := tt.ci.AcceptableGiven(tt.ignored, tt.baseFailures, now, stale)
+			ok, blocking := tt.ci.AcceptableGiven(tt.ignored, tt.baseFailures, tt.required, now, stale)
 			if ok != tt.wantOK {
 				t.Errorf("AcceptableGiven ok = %v, want %v (blocking=%v)", ok, tt.wantOK, blocking)
 			}

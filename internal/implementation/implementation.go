@@ -425,6 +425,11 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 	// (pre-existing failures the bump didn't introduce). See Bug #7.
 	ignored, baseFailures := p.suppressedChecks(ctx, pr)
 
+	// Required-status-check set for the base branch (Q7): when non-empty, only
+	// these checks gate the implementation's success criterion; empty falls back
+	// to all-checks (M2). Fetched once and reused across every CI-gate poll.
+	required := p.github.RequiredChecks(ctx, pr.BaseRef)
+
 	// Phase 3: orchestrator-owned implement → CI-fix → review loop (Bug #15).
 	//
 	// The worker is now a *bounded turn*: it makes the change, pushes, opens the
@@ -472,7 +477,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 			// Update the dashboard's CI snapshot on every poll iteration so the
 			// drawer's CI bar tracks live progress through the impl loop.
 			p.setCI(pr.Number, ci)
-			acceptable, blocking := ci.AcceptableGiven(ignored, baseFailures, time.Now(), p.config.CIStaleness)
+			acceptable, blocking := ci.AcceptableGiven(ignored, baseFailures, required, time.Now(), p.config.CIStaleness)
 			if acceptable {
 				slog.Info("CI gate passed", "pr", pr.Number, "iter", iter)
 				break
@@ -626,7 +631,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 					Branch:        branch,
 				}
 			}
-			postAcceptable, postBlocking := postCI.AcceptableGiven(ignored, baseFailures, time.Now(), p.config.CIStaleness)
+			postAcceptable, postBlocking := postCI.AcceptableGiven(ignored, baseFailures, required, time.Now(), p.config.CIStaleness)
 			if !postAcceptable {
 				return RunResult{
 					Success:       false,

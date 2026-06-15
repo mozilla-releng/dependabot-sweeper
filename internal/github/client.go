@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/go-github/v72/github"
@@ -54,6 +55,14 @@ type Client struct {
 	repoName        string
 	acceptedAuthors map[string]bool
 	botLogin        string // login of the authenticated user; empty if unresolved
+
+	// requiredChecksCache memoises the required-status-check set per base branch
+	// for the lifetime of this client. The client is created fresh each scan
+	// cycle (orchestrator.New → NewClient), so this is effectively a per-cycle
+	// cache shared by every PR goroutine — one branch-protection read per base
+	// branch per cycle instead of one per PR (Q7). Guarded by requiredChecksMu.
+	requiredChecksMu    sync.Mutex
+	requiredChecksCache map[string]map[string]bool
 }
 
 // defaultAcceptedAuthors are the PR authors GetDependabotPRs always accepts.
@@ -642,6 +651,54 @@ func (c *Client) IsBranchBehindBase(ctx context.Context, prNumber int) (bool, er
 	}
 
 	return comparison.GetBehindBy() > 0, nil
+}
+
+// RequiredChecks returns the set of status-check names that branch protection
+// requires on `branch` ("CI passing" ≡ "required checks passing", Q7). The
+// result is memoised per branch for the client's lifetime (one branch-protection
+// read per base branch per scan cycle, shared across PR goroutines).
+//
+// An empty set means "fall back to all-checks gating" (review M2 — a vacuously
+// satisfied required set must never let an all-red PR read as acceptable) and is
+// returned, with no error, whenever the required set can't be determined: branch
+// protection isn't configured (404), the token lacks the admin scope to read it
+// (403), or any other error. Reading branch protection needs an admin-scoped
+// token; without it the tool degrades safely to gating on every check.
+func (c *Client) RequiredChecks(ctx context.Context, branch string) map[string]bool {
+	c.requiredChecksMu.Lock()
+	defer c.requiredChecksMu.Unlock()
+	if c.requiredChecksCache == nil {
+		c.requiredChecksCache = make(map[string]map[string]bool)
+	}
+	if cached, ok := c.requiredChecksCache[branch]; ok {
+		return cached
+	}
+
+	set := make(map[string]bool)
+	prot, _, err := c.gh.Repositories.GetBranchProtection(ctx, c.owner, c.repoName, branch)
+	if err != nil {
+		slog.Warn("could not read required status checks — falling back to all-checks CI gating",
+			"branch", branch, "error", err)
+		c.requiredChecksCache[branch] = set
+		return set
+	}
+	if rsc := prot.GetRequiredStatusChecks(); rsc != nil {
+		for _, name := range rsc.GetContexts() { // legacy field
+			set[name] = true
+		}
+		for _, chk := range rsc.GetChecks() { // modern field
+			if chk != nil && chk.Context != "" {
+				set[chk.Context] = true
+			}
+		}
+	}
+	if len(set) > 0 {
+		slog.Info("Gating CI on required checks", "branch", branch, "count", len(set))
+	} else {
+		slog.Info("No required checks configured — gating on all checks", "branch", branch)
+	}
+	c.requiredChecksCache[branch] = set
+	return set
 }
 
 // MarkPRReadyForReview converts a draft PR to ready-for-review using the

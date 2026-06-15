@@ -167,9 +167,15 @@ func (ci CIStatus) FailureNames() []string {
 }
 
 // AcceptableGiven reports whether CI is good enough to merge, given ignored
-// checks + base-branch failures + the staleness clock. It reasons over the full
-// per-check list (ci.Checks), not the aggregate State.
+// checks + base-branch failures + the required-checks set + the staleness clock.
+// It reasons over the full per-check list (ci.Checks), not the aggregate State.
 //
+//   - Required-checks gating (Q7): when `required` is non-empty, only checks in
+//     that set can block — the repo's merge gate ignores everything else, so the
+//     tool must too ("CI passing" ≡ "required checks passing"). When `required`
+//     is empty (branch protection unconfigured, has no required set, or was
+//     unreadable), it falls back to ALL checks (review M2) — a vacuously-true
+//     "required passing" must never let an all-red PR read as acceptable.
 //   - A terminal-failing check blocks unless it is named in `ignored` (an
 //     operator-supplied list of known-noisy/structural checks) or `baseFailures`
 //     (already failing on the base branch, so the change didn't introduce it).
@@ -185,10 +191,17 @@ func (ci CIStatus) FailureNames() []string {
 // This is the success criterion for an implementation attempt: real repos
 // routinely carry pre-existing red checks unrelated to a dependency bump, so
 // requiring every check to be green would make success unreachable (Bug #7).
-func (ci CIStatus) AcceptableGiven(ignored, baseFailures map[string]bool, now time.Time, staleness time.Duration) (bool, []string) {
+func (ci CIStatus) AcceptableGiven(ignored, baseFailures, required map[string]bool, now time.Time, staleness time.Duration) (bool, []string) {
+	gateOnRequired := len(required) > 0
 	var blocking []string
 	for _, c := range ci.Checks {
 		name := c.Name
+		// Under required-checks gating a non-required check can never block — it
+		// is not part of the repo's merge gate (Q7). Keyed on the bare name (the
+		// " (stuck)" suffix is added below, after this filter).
+		if gateOnRequired && !required[name] {
+			continue
+		}
 		switch {
 		case c.isTerminalFailure():
 			if ignored[name] || baseFailures[name] {

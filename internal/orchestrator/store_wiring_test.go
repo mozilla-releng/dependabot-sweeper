@@ -81,6 +81,55 @@ func TestPrepopulateStampsNewPRsOnce(t *testing.T) {
 	}
 }
 
+// TestTerminalSHA verifies the N4 / MAJOR-1 SHA selection for the gave_up path:
+// prefer the captured post-rebase tip so the next scan's SHA-skip fires on the
+// rebased head; fall back to the scan-time SHA only when no tip was captured.
+func TestTerminalSHA(t *testing.T) {
+	if got := terminalSHA("tip-sha", "scan-sha"); got != "tip-sha" {
+		t.Errorf("terminalSHA(tip, scan) = %q, want tip-sha (must record at the post-rebase tip)", got)
+	}
+	if got := terminalSHA("", "scan-sha"); got != "scan-sha" {
+		t.Errorf("terminalSHA(\"\", scan) = %q, want scan-sha (fallback when tip uncaptured)", got)
+	}
+	if got := terminalSHA("", ""); got != "" {
+		t.Errorf("terminalSHA(\"\", \"\") = %q, want empty", got)
+	}
+}
+
+// TestGaveUpSkipFiresAfterRebase is the N4 regression test at the store level:
+// when the gave_up outcome is recorded against the post-rebase tip SHA (as the
+// orchestrator now does via terminalSHA(result.TipSHA, …)), the next scan — which
+// sees that same rebased head — correctly skips, instead of re-entering the
+// agent because it was recorded against the stale scan-time SHA.
+func TestGaveUpSkipFiresAfterRebase(t *testing.T) {
+	const prNumber = 7
+	const scanSHA = "sha-pre-rebase" // pr.HeadSHA at scan time
+	const tipSHA = "sha-post-rebase" // branch head after the Phase-0 rebase
+	const nextScanSHA = tipSHA       // next cycle sees the rebased head
+
+	s := state.NewStore()
+	o := Orchestrator{store: s}
+	s.Report(prNumber, "webpack", "major", models.StagePending, "")
+
+	// Orchestrator gave_up path: record against the captured tip, not scanSHA.
+	o.recordOutcome(prNumber, terminalSHA(tipSHA, scanSHA), models.StageGaveUp)
+
+	stored, ok := s.Get(prNumber)
+	if !ok {
+		t.Fatal("store has no entry after recordOutcome")
+	}
+	// Next scan sees the rebased head → SHA-skip MUST fire (the N4 fix).
+	if !(stored.Outcome != "" && stored.HeadSHA == nextScanSHA) {
+		t.Errorf("skip did not fire on the rebased head: stored HeadSHA=%q, next scan SHA=%q",
+			stored.HeadSHA, nextScanSHA)
+	}
+	// Had we recorded against the stale scanSHA (the N4 bug), the skip would
+	// MISS the rebased head and the PR would re-enter the agent.
+	if stored.HeadSHA == scanSHA {
+		t.Error("outcome was recorded against the stale scan-time SHA — N4 bug not fixed")
+	}
+}
+
 func TestReportStageWritesToStore(t *testing.T) {
 	s := state.NewStore()
 	o := Orchestrator{store: s}

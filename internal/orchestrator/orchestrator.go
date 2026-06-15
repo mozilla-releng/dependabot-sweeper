@@ -499,6 +499,19 @@ func (o *Orchestrator) suppressedChecks(ctx context.Context, pr models.Dependabo
 	return ignored, baseFailures
 }
 
+// terminalSHA picks the head SHA a gave_up outcome is recorded against. It
+// prefers the pipeline's captured post-rebase tip (RunResult.TipSHA): a Phase-0
+// rebase rewrites the branch head, so the scan-time SHA is stale and next
+// cycle's SHA-skip would miss, re-entering the expensive agent (N4). Falls back
+// to the scan-time SHA only when the tip was never captured (no rebase reached
+// — but those paths return GaveUp=false anyway). Pure.
+func terminalSHA(tipSHA, scanSHA string) string {
+	if tipSHA != "" {
+		return tipSHA
+	}
+	return scanSHA
+}
+
 func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR, analysis *models.AgentAnalysis) models.ReviewResult {
 	// CI not acceptable + not needs_changes → genuinely-blocking pre-existing
 	// failure. Bug #17: gate on AcceptableGiven (the single CI-acceptability
@@ -770,12 +783,20 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 			}
 
 			if result.GaveUp {
-				// Sticky: record headSHA so the next scan skips without re-running.
-				if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, fb.String()); err != nil {
+				// Sticky: record the outcome at the *post-rebase* branch tip
+				// (result.TipSHA), NOT the scan-time pr.HeadSHA. A Phase-0 rebase
+				// rewrites the branch head, so the scan-time SHA is stale; recording
+				// there would make next cycle's SHA-skip miss and re-enter the
+				// expensive agent (N4 / MAJOR-1). Both the DB outcome and the sticky
+				// comment's SHA marker (the nil-store skip key) use this SHA. Other
+				// recordOutcome calls stay on pr.HeadSHA — they are pre-rebase
+				// analysis flags or finalize (original closed, never re-scanned).
+				giveUpSHA := terminalSHA(result.TipSHA, pr.HeadSHA)
+				if err := o.github.UpsertStatusComment(ctx, pr.Number, giveUpSHA, fb.String()); err != nil {
 					slog.Warn("failed to upsert give-up comment", "pr", pr.Number, "error", err)
 				}
 				o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageGaveUp, result.Detail)
-				o.recordOutcome(pr.Number, pr.HeadSHA, models.StageGaveUp)
+				o.recordOutcome(pr.Number, giveUpSHA, models.StageGaveUp)
 			} else {
 				// Sticky: use pr.HeadSHA so the next cycle skips without re-launching
 				// the analyser/impl/reviewer (Bug #26). The PR is retried automatically

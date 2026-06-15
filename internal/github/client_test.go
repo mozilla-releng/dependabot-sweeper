@@ -331,3 +331,124 @@ func TestCompareSemver(t *testing.T) {
 		}
 	}
 }
+
+// groupPR builds a grouped dependabot PR from (memberName, toVersion) pairs.
+func groupPR(number int, group string, members ...[2]string) models.DependabotPR {
+	g := models.DependabotPR{Number: number, PackageName: group, Grouped: true}
+	for _, m := range members {
+		g.GroupedUpdates = append(g.GroupedUpdates, models.PackageBump{Name: m[0], To: m[1]})
+	}
+	return g
+}
+
+func TestFindSupersedingGroup(t *testing.T) {
+	tests := []struct {
+		name       string
+		current    models.DependabotPR
+		all        []models.DependabotPR
+		wantNumber int // 0 means nil (not superseded by a group)
+	}{
+		{
+			name:    "group covering a higher version supersedes the individual",
+			current: pr(1, "lodash", "4.17.21", "5.0.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.17.21", "5.0.0"),
+				groupPR(2, "npm-deps", [2]string{"lodash", "5.1.0"}, [2]string{"react", "19.0.0"}),
+			},
+			wantNumber: 2,
+		},
+		{
+			name:    "group covering the SAME version supersedes (>= rule)",
+			current: pr(1, "lodash", "4.17.21", "5.0.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.17.21", "5.0.0"),
+				groupPR(2, "npm-deps", [2]string{"lodash", "5.0.0"}),
+			},
+			wantNumber: 2,
+		},
+		{
+			name:    "group covering a LOWER version does NOT supersede (individual kept)",
+			current: pr(1, "lodash", "4.17.21", "5.2.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.17.21", "5.2.0"),
+				groupPR(2, "npm-deps", [2]string{"lodash", "5.1.0"}),
+			},
+			wantNumber: 0,
+		},
+		{
+			name:    "group not covering the package does not supersede",
+			current: pr(1, "lodash", "4.17.21", "5.0.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.17.21", "5.0.0"),
+				groupPR(2, "npm-deps", [2]string{"react", "19.0.0"}),
+			},
+			wantNumber: 0,
+		},
+		{
+			name:    "a grouped current PR is never superseded this way (asymmetry)",
+			current: groupPR(1, "npm-deps", [2]string{"lodash", "5.0.0"}),
+			all: []models.DependabotPR{
+				groupPR(1, "npm-deps", [2]string{"lodash", "5.0.0"}),
+				groupPR(2, "other", [2]string{"lodash", "9.9.9"}),
+			},
+			wantNumber: 0,
+		},
+		{
+			name:    "non-semver individual version returns nil",
+			current: pr(1, "lodash", "x", "weird"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "x", "weird"),
+				groupPR(2, "npm-deps", [2]string{"lodash", "9.9.9"}),
+			},
+			wantNumber: 0,
+		},
+		{
+			name:    "non-semver group member is skipped",
+			current: pr(1, "lodash", "4.0.0", "5.0.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.0.0", "5.0.0"),
+				groupPR(2, "npm-deps", [2]string{"lodash", "weird"}),
+			},
+			wantNumber: 0,
+		},
+		{
+			name:    "highest-version covering group wins among several",
+			current: pr(1, "lodash", "4.0.0", "5.0.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.0.0", "5.0.0"),
+				groupPR(2, "g-a", [2]string{"lodash", "5.1.0"}),
+				groupPR(3, "g-b", [2]string{"lodash", "5.4.0"}),
+				groupPR(4, "g-c", [2]string{"lodash", "5.2.0"}),
+			},
+			wantNumber: 3,
+		},
+		{
+			name:    "individual ahead of the group is NOT superseded (group stays open too)",
+			current: pr(1, "lodash", "4.0.0", "6.0.0"),
+			all: []models.DependabotPR{
+				pr(1, "lodash", "4.0.0", "6.0.0"),
+				groupPR(2, "npm-deps", [2]string{"lodash", "5.0.0"}),
+			},
+			wantNumber: 0,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := FindSupersedingGroup(tc.current, tc.all)
+			if tc.wantNumber == 0 {
+				if got != nil {
+					t.Errorf("expected nil, got group PR #%d", got.Number)
+				}
+				return
+			}
+			if got == nil {
+				t.Errorf("expected group PR #%d, got nil", tc.wantNumber)
+				return
+			}
+			if got.Number != tc.wantNumber {
+				t.Errorf("expected group PR #%d, got PR #%d", tc.wantNumber, got.Number)
+			}
+		})
+	}
+}

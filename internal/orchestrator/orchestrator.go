@@ -231,6 +231,14 @@ func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 	return out
 }
 
+// belowMinBump reports whether a bump is below the configured engage threshold
+// and should be skipped out of policy (Q5). unknown ranks lowest, so the default
+// `major` threshold skips it — a non-bump PR from the trusted author never
+// reaches the agent. Pure.
+func belowMinBump(bump, min models.BumpType) bool {
+	return models.BumpRank(bump) < models.BumpRank(min)
+}
+
 func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, allPRs []models.DependabotPR) models.ReviewResult {
 	slog.Info("Processing PR",
 		"number", pr.Number,
@@ -250,47 +258,68 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	o.setVersions(pr.Number, pr.OldVersion, pr.NewVersion, pr.Ecosystem)
 	o.setCI(pr.Number, pr.CI)
 
-	// Step 1: Skip patches
-	if pr.BumpType == models.BumpPatch && !pr.Grouped {
-		slog.Info("Patch bump, skipping (auto-merged by dependabot)", "pr", pr.Number)
-		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageSkipped, "patch — handled by dependabot auto-merge")
-		return models.ReviewResult{
-			PRNumber:    pr.Number,
-			PackageName: pr.PackageName,
-			OldVersion:  pr.OldVersion,
-			NewVersion:  pr.NewVersion,
-			Action:      models.ActionSkippedPatch,
-			Detail:      "Patch bump — handled by dependabot auto-merge",
-			Success:     true,
-		}
-	}
-
-	// Step 2: Staleness check (skipped for grouped PRs — a group has no single
-	// version to compare).
-	if newer := ghclient.FindNewerPRForPackage(pr, allPRs); newer != nil && !pr.Grouped {
-		detail := fmt.Sprintf("Superseded by #%d (%s → %s)", newer.Number, newer.OldVersion, newer.NewVersion)
-		slog.Info("Stale PR", "pr", pr.Number, "detail", detail)
-		if !o.dryRun {
-			if err := o.github.ClosePRWithComment(ctx, pr.Number,
-				fmt.Sprintf("Closing as stale — this PR is superseded by #%d "+
-					"which bumps %s to a newer version (%s).\n\n_Automated review._",
-					newer.Number, pr.PackageName, newer.NewVersion)); err != nil {
-				slog.Warn("failed to close stale PR", "pr", pr.Number, "error", err)
-			}
-		}
-		action := models.ActionClosedStale
-		if o.dryRun {
-			action = models.ActionDryRun
-		}
+	// Step 1: Skip bumps below the per-repo engage threshold (Q5). The default
+	// `major` skips passing patch/minor (dependabot auto-merges those) AND
+	// `unknown`-titled PRs (BumpRank ranks unknown lowest) — so a non-bump PR
+	// from the trusted author never reaches the agent. A grouped PR is ranked by
+	// its highest member bump (maxGroupedBump), so a group is engaged iff that
+	// max meets the threshold. The reason is recorded on the dashboard.
+	if belowMinBump(pr.BumpType, o.config.MinBumpToEngage) {
+		detail := fmt.Sprintf("skipped: %s bump — below the configured minimum to engage (%s)",
+			pr.BumpType, o.config.MinBumpToEngage)
+		slog.Info("Bump below engage threshold — skipping", "pr", pr.Number,
+			"bump", pr.BumpType, "min", o.config.MinBumpToEngage)
 		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageSkipped, detail)
 		return models.ReviewResult{
 			PRNumber:    pr.Number,
 			PackageName: pr.PackageName,
 			OldVersion:  pr.OldVersion,
 			NewVersion:  pr.NewVersion,
-			Action:      action,
+			Action:      models.ActionSkippedPolicy,
 			Detail:      detail,
 			Success:     true,
+		}
+	}
+
+	// Step 2: Staleness. A PR is superseded if a newer INDIVIDUAL PR bumps the
+	// same package higher (existing behaviour), or (Q6) a grouped PR already
+	// covers this package at >= this version. A grouped PR is never closed as
+	// stale — it bumps other members too — and an individual never closes a
+	// whole group; hence the !pr.Grouped guard and the directional group check.
+	if !pr.Grouped {
+		var detail, comment string
+		if newer := ghclient.FindNewerPRForPackage(pr, allPRs); newer != nil {
+			detail = fmt.Sprintf("Superseded by #%d (%s → %s)", newer.Number, newer.OldVersion, newer.NewVersion)
+			comment = fmt.Sprintf("Closing as stale — this PR is superseded by #%d "+
+				"which bumps %s to a newer version (%s).\n\n_Automated review._",
+				newer.Number, pr.PackageName, newer.NewVersion)
+		} else if group := ghclient.FindSupersedingGroup(pr, allPRs); group != nil {
+			detail = fmt.Sprintf("Superseded by group #%d", group.Number)
+			comment = fmt.Sprintf("Closing as stale — the grouped update #%d already includes %s "+
+				"at this version or newer.\n\n_Automated review._",
+				group.Number, pr.PackageName)
+		}
+		if detail != "" {
+			slog.Info("Stale PR", "pr", pr.Number, "detail", detail)
+			if !o.dryRun {
+				if err := o.github.ClosePRWithComment(ctx, pr.Number, comment); err != nil {
+					slog.Warn("failed to close stale PR", "pr", pr.Number, "error", err)
+				}
+			}
+			action := models.ActionClosedStale
+			if o.dryRun {
+				action = models.ActionDryRun
+			}
+			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageSkipped, detail)
+			return models.ReviewResult{
+				PRNumber:    pr.Number,
+				PackageName: pr.PackageName,
+				OldVersion:  pr.OldVersion,
+				NewVersion:  pr.NewVersion,
+				Action:      action,
+				Detail:      detail,
+				Success:     true,
+			}
 		}
 	}
 
@@ -862,8 +891,8 @@ func PrintSummary(results []models.ReviewResult) {
 			}
 		case models.ActionFlaggedForHuman:
 			actionSymbol = "FLAGGED"
-		case models.ActionSkippedPatch:
-			actionSymbol = "SKIPPED (patch)"
+		case models.ActionSkippedPolicy:
+			actionSymbol = "SKIPPED (policy)"
 		case models.ActionSkippedPending:
 			actionSymbol = "SKIPPED (CI pending)"
 		case models.ActionSkippedNoChange:

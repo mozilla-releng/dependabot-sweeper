@@ -104,8 +104,11 @@ repo). Tick the phase when its items below are done.
   7. [x] Sweeper-PR naming + DB-record exclusion + pairing attribute (Q14). **PR #6.**
   8. [ ] Worker-authored justification, private-through-review, posted on approval (Q15) — **deferred (agentic).**
 - [ ] **Phase 4 — UI items.** PR→GitHub link; `#183 / #204` pairing display.
-- [ ] **Phase 5 — Docs.** Add the two-PR-type lifecycle section; fold the North Star into
-  `docs/PRINCIPLES.md`. (`spec.go` reconciliation moved to Phase 3.0 per review C2.)
+- [~] **Phase 5 — Docs.** `docs/PRINCIPLES.md` **created** (resolves the dangling reference that
+  ALGORITHM.md/memory pointed at; North Star + non-negotiables at current-state UX level, mechanism
+  left to ALGORITHM.md). The **two-PR-type lifecycle section is deferred** to land with Q14's merge
+  (PR #6): documenting the `fix(...)` naming + `created_prs` as current state before that PR merges
+  would describe not-yet-current behaviour. (`spec.go` reconciliation is in the Phase 3.2 cluster.)
 
 **Cross-cutting (review):**
 - **Tests** for every new gate, extending the existing pure-function test pattern

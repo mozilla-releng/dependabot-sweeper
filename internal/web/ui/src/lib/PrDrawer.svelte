@@ -50,7 +50,12 @@
   <div class="flex items-start justify-between gap-2 px-4 py-3 border-b border-gray-100 dark:border-gray-800">
     <div class="min-w-0">
       <div class="flex items-center gap-2 flex-wrap">
-        <span class="font-mono font-bold text-gray-900 dark:text-gray-100">#{pr.pr_number}</span>
+        {#if pr.url}
+          <a href={pr.url} target="_blank" rel="noopener noreferrer"
+             class="font-mono font-bold text-gray-900 dark:text-gray-100 hover:underline">#{pr.pr_number}</a>
+        {:else}
+          <span class="font-mono font-bold text-gray-900 dark:text-gray-100">#{pr.pr_number}</span>
+        {/if}
         <StageBadge stage={pr.stage} />
       </div>
       <p class="mt-0.5 text-sm font-medium text-gray-700 dark:text-gray-300 truncate" title={pr.package_name}>

@@ -48,7 +48,13 @@
         #{pr.pr_number}
       </span>
       {#if pr.replacement_pr}
-        <span class="text-gray-400 dark:text-gray-500 text-xs shrink-0">→ #{pr.replacement_pr}</span>
+        {#if pr.replacement_pr_url}
+          <a href={pr.replacement_pr_url} target="_blank" rel="noopener noreferrer"
+             class="text-gray-400 dark:text-gray-500 text-xs shrink-0 hover:underline"
+             onclick={(e) => e.stopPropagation()}>→ #{pr.replacement_pr}</a>
+        {:else}
+          <span class="text-gray-400 dark:text-gray-500 text-xs shrink-0">→ #{pr.replacement_pr}</span>
+        {/if}
       {/if}
       <StageBadge stage={pr.stage} />
     </div>

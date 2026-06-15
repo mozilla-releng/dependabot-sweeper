@@ -403,6 +403,14 @@ type PRProgress struct {
 	LastUpdated   time.Time    `json:"last_updated"`
 	History       []StageEvent `json:"history"`
 
+	// URL is the GitHub HTML URL of this PR (e.g. https://github.com/owner/repo/pull/N).
+	// Captured at scan time from DependabotPR.URL.
+	URL string `json:"url,omitempty"`
+
+	// ReplacementPRURL is the GitHub HTML URL of the sweeper's replacement PR, if one
+	// was opened. Constructed from the repo and PR number when SetReplacementPR is called.
+	ReplacementPRURL string `json:"replacement_pr_url,omitempty"`
+
 	// Version metadata captured at scan time from DependabotPR.
 	OldVersion string `json:"old_version,omitempty"`
 	NewVersion string `json:"new_version,omitempty"`

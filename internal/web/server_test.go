@@ -61,12 +61,13 @@ func (s *testStore) Report(prNumber int, pkg, bump string, stage models.PRStage,
 	s.broadcast()
 }
 
-func (s *testStore) SetVersions(prNumber int, oldVer, newVer, ecosystem string) {
+func (s *testStore) SetVersions(prNumber int, oldVer, newVer, ecosystem, url string) {
 	s.mu.Lock()
 	if p, ok := s.prs[prNumber]; ok {
 		p.OldVersion = oldVer
 		p.NewVersion = newVer
 		p.Ecosystem = ecosystem
+		p.URL = url
 	}
 	s.mu.Unlock()
 }
@@ -380,7 +381,7 @@ func TestIndexServesHTML(t *testing.T) {
 func TestPRsEndpointSerializesVersionsAndCI(t *testing.T) {
 	srv, store := newTestServer(t)
 	store.Report(7, "lodash", "minor", models.StageAnalysing, "")
-	store.SetVersions(7, "4.17.20", "4.17.21", "npm")
+	store.SetVersions(7, "4.17.20", "4.17.21", "npm", "https://github.com/owner/repo/pull/7")
 	conc := "success"
 	store.SetCI(7, models.CIStatus{
 		State:  "success",
@@ -441,7 +442,7 @@ func TestPRsEndpointSerializesVersionsAndCI(t *testing.T) {
 func TestSinglePREndpointSerializesCI(t *testing.T) {
 	srv, store := newTestServer(t)
 	store.Report(99, "axios", "major", models.StageWaitingCI, "")
-	store.SetVersions(99, "1.6.0", "2.0.0", "npm")
+	store.SetVersions(99, "1.6.0", "2.0.0", "npm", "https://github.com/owner/repo/pull/99")
 	conc := "failure"
 	store.SetCI(99, models.CIStatus{
 		State:  "failure",

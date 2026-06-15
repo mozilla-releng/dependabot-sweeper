@@ -84,6 +84,8 @@ export interface PRProgress {
   old_version?: string
   new_version?: string
   ecosystem?: string
+  url?: string
+  replacement_pr_url?: string
   ci?: CIStatus
   analysis?: AgentAnalysis
   // Terminal outcome idempotency (v3): set once a PR reaches a terminal stage.

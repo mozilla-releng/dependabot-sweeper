@@ -12,7 +12,7 @@ import "github.com/mozilla-releng/dependabot-sweeper/internal/models"
 type Writer interface {
 	Report(prNumber int, pkg, bump string, stage models.PRStage, detail string)
 	SetImplMeta(prNumber int, sessionID, worktreePath, branch string)
-	SetReplacementPR(prNumber, n int)
+	SetReplacementPR(prNumber, n int, replacementURL string)
 	// Reap removes rows for any PR whose number is not in openPRs. It is called
 	// once per scan, keyed off the full set returned by GetDependabotPRs, so
 	// closed PRs disappear from the dashboard on the next scan cycle.
@@ -21,7 +21,7 @@ type Writer interface {
 	// SetVersions records the version metadata (old/new version string and
 	// ecosystem) for a known PR. No-op for an unknown PR. Called once at
 	// StagePending so every card on the board shows the version diff.
-	SetVersions(prNumber int, oldVer, newVer, ecosystem string)
+	SetVersions(prNumber int, oldVer, newVer, ecosystem, url string)
 
 	// SetCI records the latest CI snapshot for a known PR. No-op for an unknown
 	// PR. Called after the initial fetch (pr.CI from GetDependabotPRs) and after

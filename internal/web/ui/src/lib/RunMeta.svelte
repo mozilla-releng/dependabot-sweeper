@@ -9,13 +9,13 @@
     return isNaN(d.getTime()) ? '—' : d.toLocaleString()
   }
 
-  type Row = { label: string; value: string; mono?: boolean }
+  type Row = { label: string; value: string; mono?: boolean; href?: string }
   const rows = $derived<Row[]>([
     { label: 'Last updated', value: fmtTime(pr.last_updated) },
-    ...(pr.impl_branch   ? [{ label: 'Branch',       value: pr.impl_branch,   mono: true }] : []),
-    ...(pr.worktree_path ? [{ label: 'Worktree',      value: pr.worktree_path, mono: true }] : []),
-    ...(pr.session_id    ? [{ label: 'Session',       value: pr.session_id,   mono: true }] : []),
-    ...(pr.replacement_pr ? [{ label: 'Replacement PR', value: `#${pr.replacement_pr}` }] : []),
+    ...(pr.impl_branch   ? [{ label: 'Branch',          value: pr.impl_branch,        mono: true }] : []),
+    ...(pr.worktree_path ? [{ label: 'Worktree',         value: pr.worktree_path,      mono: true }] : []),
+    ...(pr.session_id    ? [{ label: 'Session',          value: pr.session_id,         mono: true }] : []),
+    ...(pr.replacement_pr ? [{ label: 'Replacement PR',  value: `#${pr.replacement_pr}`, href: pr.replacement_pr_url }] : []),
   ])
 </script>
 
@@ -28,7 +28,7 @@
         <dt class="w-28 shrink-0 text-gray-500 dark:text-gray-400">{row.label}</dt>
         <dd class="flex-1 min-w-0 text-gray-800 dark:text-gray-200 truncate {row.mono ? 'font-mono' : ''}"
             title={row.value}
-        >{row.value}</dd>
+        >{#if row.href}<a href={row.href} target="_blank" rel="noopener noreferrer" class="hover:underline">{row.value}</a>{:else}{row.value}{/if}</dd>
       </div>
     {/each}
   </dl>

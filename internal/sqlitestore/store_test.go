@@ -102,7 +102,7 @@ func TestSetImplMetaAndReplacement(t *testing.T) {
 	s := openWriter(t)
 	s.Report(7, "pkg", "minor", models.StageImplStarting, "")
 	s.SetImplMeta(7, "sess-uuid", "/tmp/sweeper-impl-xyz/repo", "auto/fix/pkg-2.0.0")
-	s.SetReplacementPR(7, 99)
+	s.SetReplacementPR(7, 99, "https://github.com/owner/repo/pull/99")
 
 	got, _ := s.Get(7)
 	if got.SessionID != "sess-uuid" {
@@ -117,6 +117,9 @@ func TestSetImplMetaAndReplacement(t *testing.T) {
 	if got.ReplacementPR == nil || *got.ReplacementPR != 99 {
 		t.Errorf("ReplacementPR = %v, want 99", got.ReplacementPR)
 	}
+	if got.ReplacementPRURL != "https://github.com/owner/repo/pull/99" {
+		t.Errorf("ReplacementPRURL = %q", got.ReplacementPRURL)
+	}
 }
 
 func TestSetImplMetaOnUnknownPRIsNoop(t *testing.T) {
@@ -130,7 +133,7 @@ func TestSetImplMetaOnUnknownPRIsNoop(t *testing.T) {
 
 func TestSetReplacementPROnUnknownPRIsNoop(t *testing.T) {
 	s := openWriter(t)
-	s.SetReplacementPR(999, 1) // must not create a row
+	s.SetReplacementPR(999, 1, "") // must not create a row
 	_, ok := s.Get(999)
 	if ok {
 		t.Errorf("SetReplacementPR on unknown PR must not create an entry")
@@ -174,7 +177,7 @@ func TestDurabilityAfterReopen(t *testing.T) {
 	s1.Report(10, "vue", "major", models.StagePending, "first")
 	s1.Report(10, "vue", "major", models.StageAnalysing, "second")
 	s1.SetImplMeta(10, "sid", "/worktree", "branch")
-	s1.SetReplacementPR(10, 42)
+	s1.SetReplacementPR(10, 42, "https://github.com/owner/repo/pull/42")
 	s1.Close()
 
 	s2 := openAt(t, path, false)
@@ -333,17 +336,20 @@ func TestReapNoOpWhenAllOpen(t *testing.T) {
 func TestSetVersionsRoundTrip(t *testing.T) {
 	s := openWriter(t)
 	s.Report(10, "lodash", "minor", models.StagePending, "")
-	s.SetVersions(10, "4.17.20", "4.17.21", "npm")
+	s.SetVersions(10, "4.17.20", "4.17.21", "npm", "https://github.com/owner/repo/pull/10")
 
 	got, _ := s.Get(10)
 	if got.OldVersion != "4.17.20" || got.NewVersion != "4.17.21" || got.Ecosystem != "npm" {
 		t.Errorf("SetVersions not persisted: old=%q new=%q eco=%q", got.OldVersion, got.NewVersion, got.Ecosystem)
 	}
+	if got.URL != "https://github.com/owner/repo/pull/10" {
+		t.Errorf("SetVersions URL not persisted: url=%q", got.URL)
+	}
 }
 
 func TestSetVersionsOnUnknownPRIsNoop(t *testing.T) {
 	s := openWriter(t)
-	s.SetVersions(999, "1.0", "2.0", "npm")
+	s.SetVersions(999, "1.0", "2.0", "npm", "")
 	if _, ok := s.Get(999); ok {
 		t.Error("SetVersions on unknown PR must not create a row")
 	}

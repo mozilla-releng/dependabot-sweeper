@@ -115,17 +115,17 @@ func (o *Orchestrator) prepopulate(prs []models.DependabotPR) {
 	}
 }
 
-// reportReplacement is the nil-safe shim for recording a replacement PR number.
-func (o *Orchestrator) reportReplacement(prNumber, replacementN int) {
+// reportReplacement is the nil-safe shim for recording a replacement PR number and URL.
+func (o *Orchestrator) reportReplacement(prNumber, replacementN int, replacementURL string) {
 	if o.store != nil {
-		o.store.SetReplacementPR(prNumber, replacementN)
+		o.store.SetReplacementPR(prNumber, replacementN, replacementURL)
 	}
 }
 
-// setVersions is the nil-safe shim for recording version metadata.
-func (o *Orchestrator) setVersions(prNumber int, oldVer, newVer, ecosystem string) {
+// setVersions is the nil-safe shim for recording version metadata and source URL.
+func (o *Orchestrator) setVersions(prNumber int, oldVer, newVer, ecosystem, url string) {
 	if o.store != nil {
-		o.store.SetVersions(prNumber, oldVer, newVer, ecosystem)
+		o.store.SetVersions(prNumber, oldVer, newVer, ecosystem, url)
 	}
 }
 
@@ -292,7 +292,7 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	// dashboard can show old→new and CI state even for PRs that are skipped
 	// early (patch, stale, not-settled, already-processed) without waiting
 	// for analysis to complete.
-	o.setVersions(pr.Number, pr.OldVersion, pr.NewVersion, pr.Ecosystem)
+	o.setVersions(pr.Number, pr.OldVersion, pr.NewVersion, pr.Ecosystem, pr.URL)
 	o.setCI(pr.Number, pr.CI)
 
 	// Step 1: Skip bumps below the per-repo engage threshold (Q5). The default
@@ -735,7 +735,7 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 		} else if exists {
 			slog.Info("replacement PR already exists — skipping pipeline", "pr", pr.Number, "replacement", existingN)
 			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, fmt.Sprintf("replacement PR #%d already exists", existingN))
-			o.reportReplacement(pr.Number, existingN)
+			o.reportReplacement(pr.Number, existingN, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, existingN))
 			o.recordCreatedPR(existingN, pr.Number) // ensure our own PR is excluded even if found pre-existing (Q14)
 			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
 			return models.ReviewResult{
@@ -790,7 +790,7 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 			}
 
 			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, result.Detail)
-			o.reportReplacement(pr.Number, replacementNumber)
+			o.reportReplacement(pr.Number, replacementNumber, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, replacementNumber))
 			o.recordCreatedPR(replacementNumber, pr.Number) // exclude our own PR from future scans (Q14)
 			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
 			return models.ReviewResult{

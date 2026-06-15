@@ -73,18 +73,36 @@ func Open(path string, writer bool) (*Store, error) {
 
 // currentSchemaVersion is the schema version stamped into PRAGMA user_version.
 // Increment this and add a migration block to migrate() when the schema changes.
-const currentSchemaVersion = 1
+const currentSchemaVersion = 2
 
 // migrate stamps user_version on a fresh DB and runs any incremental migrations
 // for DBs created by older versions of the binary.
+//
+// Version 0 means a fresh DB — schema.sql already has all current columns, so
+// no DDL is needed; we only stamp the version. For any existing DB (version > 0),
+// each "if version < N" block runs for all DBs below version N, so every
+// intermediate step is applied in order regardless of how far back the upgrade
+// reaches.
 func migrate(db *sql.DB) error {
 	var version int
 	_ = db.QueryRow(`PRAGMA user_version`).Scan(&version)
 	if version >= currentSchemaVersion {
 		return nil
 	}
-	// Fresh DB (user_version == 0): schema.sql already created all tables with
-	// all current columns — just stamp the version.
+	if version > 0 {
+		if version < 2 {
+			// v1 → v2: add GitHub URL columns for dashboard linking (Phase 4a+4b).
+			for _, col := range []string{
+				`ALTER TABLE pr_progress ADD COLUMN pr_url TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE pr_progress ADD COLUMN replacement_pr_url TEXT NOT NULL DEFAULT ''`,
+			} {
+				if _, err := db.Exec(col); err != nil {
+					return fmt.Errorf("migrate v1→v2: %w", err)
+				}
+			}
+		}
+		// Future migrations: add "if version < N { ... }" blocks here.
+	}
 	_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, currentSchemaVersion))
 	return err
 }
@@ -160,13 +178,13 @@ func (s *Store) SetImplMeta(prNumber int, sessionID, worktreePath, branch string
 	)
 }
 
-// SetReplacementPR records the replacement PR number for a known PR. No-op for
-// an unknown PR.
-func (s *Store) SetReplacementPR(prNumber, n int) {
+// SetReplacementPR records the replacement PR number and its GitHub URL for a
+// known PR. No-op for an unknown PR.
+func (s *Store) SetReplacementPR(prNumber, n int, replacementURL string) {
 	now := toUnixNano(time.Now())
 	_, _ = s.db.Exec(`
-		UPDATE pr_progress SET replacement_pr=?, last_updated=? WHERE pr_number=?`,
-		n, now, prNumber,
+		UPDATE pr_progress SET replacement_pr=?, replacement_pr_url=?, last_updated=? WHERE pr_number=?`,
+		n, replacementURL, now, prNumber,
 	)
 }
 
@@ -193,13 +211,13 @@ func (s *Store) Reap(openPRs []int) {
 	_, _ = s.db.Exec(q, args...)
 }
 
-// SetVersions records the version metadata for a known PR. No-op for an unknown PR.
-func (s *Store) SetVersions(prNumber int, oldVer, newVer, ecosystem string) {
+// SetVersions records the version metadata and GitHub URL for a known PR. No-op for an unknown PR.
+func (s *Store) SetVersions(prNumber int, oldVer, newVer, ecosystem, url string) {
 	now := toUnixNano(time.Now())
 	_, _ = s.db.Exec(`
-		UPDATE pr_progress SET old_version=?, new_version=?, ecosystem=?, last_updated=?
+		UPDATE pr_progress SET old_version=?, new_version=?, ecosystem=?, pr_url=?, last_updated=?
 		WHERE pr_number=?`,
-		oldVer, newVer, ecosystem, now, prNumber,
+		oldVer, newVer, ecosystem, url, now, prNumber,
 	)
 }
 
@@ -309,7 +327,7 @@ func (s *Store) Get(prNumber int) (models.PRProgress, bool) {
 	row := s.db.QueryRow(`
 		SELECT pr_number, package_name, bump_type, stage,
 		       session_id, worktree_path, impl_branch, replacement_pr, last_updated,
-		       old_version, new_version, ecosystem,
+		       old_version, new_version, ecosystem, pr_url, replacement_pr_url,
 		       ci_state, ci_total, ci_passed, ci_failed, ci_pending, analysis_json,
 		       head_sha, outcome
 		FROM pr_progress WHERE pr_number=?`, prNumber)
@@ -337,7 +355,7 @@ func (s *Store) All() []models.PRProgress {
 	rows, err := s.db.Query(`
 		SELECT pr_number, package_name, bump_type, stage,
 		       session_id, worktree_path, impl_branch, replacement_pr, last_updated,
-		       old_version, new_version, ecosystem,
+		       old_version, new_version, ecosystem, pr_url, replacement_pr_url,
 		       ci_state, ci_total, ci_passed, ci_failed, ci_pending, analysis_json,
 		       head_sha, outcome
 		FROM pr_progress ORDER BY pr_number`)
@@ -437,7 +455,7 @@ func scanProgress(row scanner) (models.PRProgress, error) {
 	err := row.Scan(
 		&p.PRNumber, &p.PackageName, &p.BumpType, &stageStr,
 		&p.SessionID, &p.WorktreePath, &p.ImplBranch, &replPR, &nanos,
-		&p.OldVersion, &p.NewVersion, &p.Ecosystem,
+		&p.OldVersion, &p.NewVersion, &p.Ecosystem, &p.URL, &p.ReplacementPRURL,
 		&ciState, &ciTotal, &ciPassed, &ciFailed, &ciPending, &analysisJSON,
 		&p.HeadSHA, &p.Outcome,
 	)

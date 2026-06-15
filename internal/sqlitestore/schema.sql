@@ -1,4 +1,4 @@
--- schema version 1
+-- schema version 2
 
 CREATE TABLE IF NOT EXISTS pr_progress (
     pr_number      INTEGER PRIMARY KEY,
@@ -15,6 +15,10 @@ CREATE TABLE IF NOT EXISTS pr_progress (
     old_version    TEXT    NOT NULL DEFAULT '',
     new_version    TEXT    NOT NULL DEFAULT '',
     ecosystem      TEXT    NOT NULL DEFAULT '',
+
+    -- PR URLs (v4: dashboard links to GitHub)
+    pr_url             TEXT    NOT NULL DEFAULT '',
+    replacement_pr_url TEXT    NOT NULL DEFAULT '',
 
     -- CI aggregate counts (v2; checks detail in ci_checks table)
     ci_state       TEXT    NOT NULL DEFAULT '',

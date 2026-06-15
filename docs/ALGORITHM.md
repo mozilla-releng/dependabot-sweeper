@@ -131,12 +131,12 @@ Titles that don't parse as a known bump format are still processed (with bump ty
 rather than dropped — in an unattended cron loop, silently losing a PR is worse than analysing
 one off its diff.
 
-**The author filter is the *only* exclusion today** — there is no filter for the tool's own
-generated fix PRs. In production their author isn't `dependabot[bot]`/`renovate[bot]` so they're
-skipped by coincidence; on the test bed (where `--accept-author` is also the fix-PR author) a fix
-PR can be re-ingested as a fresh dependabot PR. **Decided fix (Q14):** the tool records every PR
-it creates and permanently excludes those from scans (a DB record, not a branch-name/title
-heuristic — branch names are attacker-spoofable). In-scope remains author-filter-only. See T12.
+**Two gates together determine in-scope PRs.** The author filter is the primary gate. A second,
+reap-exempt gate (Q14 — see *Two-PR-type lifecycle* below) permanently excludes any PR the tool
+itself created: a `created_prs` DB record checked before processing, so the tool never
+re-ingests one of its own replacement PRs as a fresh dependabot PR. In-scope is decided purely
+by these two criteria; branch name and title are not used as exclusion signals (branch names are
+attacker-spoofable). See T12.
 
 ## The decision algorithm (current)
 
@@ -436,6 +436,113 @@ verified, then:
 **⚠️ This phase has a serious confirmed bug — see T9.** The squash resets to the *scan-time*
 `pr.HeadSHA`, which is stale after a Phase-0 rebase, producing a "fix" commit that bundles in
 every unrelated change merged to `main` since the branch's original base.
+
+---
+
+## Two-PR-type lifecycle
+
+The sweeper manages two distinct kinds of pull request on the target repo:
+
+1. **Dependabot PRs** — opened by `dependabot[bot]` or `renovate[bot]` (or a test-bed
+   accepted author). These are the unit of work: the tool scans them, decides what to do, and
+   either comments on them or closes them in favour of a replacement.
+
+2. **Sweeper ("fix") PRs** — opened by the tool itself when an implementation is needed. Each
+   is a replacement for one dependabot PR, containing the same version bump plus one or more
+   additional commits that make the change compatible.
+
+### Naming
+
+A sweeper PR's title is derived programmatically from the originating dependabot title by
+swapping the conventional-commit type to `fix` (`SweeperPRTitle` in
+`internal/implementation/implementation.go`):
+
+- `build(deps): bump X from A to B` → `fix(deps): bump X from A to B`
+- `chore(deps): bump X from A to B` → `fix(deps): bump X from A to B`
+- A bare `Bump X from A to B` (no conventional prefix) → `fix(deps): Bump X from A to B`
+
+The rule: replace whatever conventional-commit type was there with `fix`, keeping the scope
+(e.g. `(deps)`) and everything after the colon intact. When there is no recognisable
+conventional prefix, prepend `fix(deps): `. The scope and description are never rewritten.
+
+This makes sweeper PRs visibly and structurally distinct from dependabot PRs — the `fix` type
+appears in the PR list, making it clear which PRs the tool authored and which are raw dependabot
+bumps. (Before Q14, the tool overwrote the title with the verbatim dependabot string, making
+the two PR types indistinguishable.)
+
+### Exclusion from scanning (reap-exempt `created_prs` table)
+
+Because sweeper PRs are opened under the same accepted-author login used on the test bed (and
+could in principle be from any accepted author), the author filter alone is not enough to keep
+them out of the scan. A sweeper PR re-entered as a fresh dependabot PR would trigger an
+expensive agentic step — a runaway-cost incident.
+
+The solution is a permanent DB record. Every time the tool opens a replacement PR it writes a
+row to the `created_prs` table:
+
+```sql
+CREATE TABLE IF NOT EXISTS created_prs (
+    pr_number  INTEGER PRIMARY KEY,   -- the sweeper "fix" PR number
+    origin_pr  INTEGER NOT NULL DEFAULT 0,   -- the originating dependabot PR
+    created_at INTEGER NOT NULL DEFAULT 0    -- unix nanoseconds, UTC
+);
+```
+
+At the start of every scan cycle, `excludeOwnPRs` checks the list of currently open accepted-
+author PRs against this table and drops any whose number appears in it, *before* any per-PR
+processing begins.
+
+Critically, `created_prs` is **never reaped**. `Store.Reap` prunes `pr_progress` (which is
+keyed to the live open-PR set and gets stale rows pruned each cycle), but it never touches
+`created_prs`. This means the exclusion record outlives the `pr_progress` row for the sweeper
+PR — even after the PR is merged or closed and its `pr_progress` row is gone, the tool still
+knows it created that PR number and will not re-ingest it if it somehow reappears (Q14 /
+review C1).
+
+The exclusion is keyed on PR **number**, not on branch name or title. Branch names are
+attacker-controllable (anyone can open a PR from a branch named `auto/fix/...`); the DB record
+of what-the-tool-actually-created cannot be spoofed.
+
+### Pairing with the originating dependabot PR
+
+The `created_prs` table records `origin_pr` (the dependabot PR number the sweeper PR was
+created for). In parallel, `pr_progress.replacement_pr` on the dependabot PR's row records the
+sweeper PR number (forward link). Together these provide bidirectional pairing:
+
+- **Forward** (`pr_progress.replacement_pr`): given a dependabot PR, find its replacement.
+- **Reverse** (`created_prs.origin_pr`): given a sweeper PR number, find the dependabot PR it
+  came from.
+
+The pairing feeds the dashboard's `#183 / #204` display (Phase 4 — see WORKPLAN.md).
+
+### Full lifecycle
+
+```
+dependabot opens PR #183: "build(deps): bump X from 1.0 to 2.0"
+         │
+         ▼
+tool scans #183 → implementation needed
+         │
+         ▼
+tool opens draft PR #204 with title "fix(deps): bump X from 1.0 to 2.0"
+  → writes created_prs row: (pr_number=204, origin_pr=183)
+  → writes pr_progress.replacement_pr=204 on row 183
+         │
+         ▼
+CI loop: worker pushes additional commits; CI verified green
+         │
+         ▼
+finalize:
+  → original PR #183 closed with a reference to #204
+  → #204 un-drafted (marked ready for review)
+         │
+         ▼
+next cycle scans open PRs:
+  → #183 is closed → not in open set → not scanned
+  → #204 is open, authored by the accepted author → author filter admits it
+  → but created_prs contains pr_number=204 → excludeOwnPRs drops it
+  → #204 is never re-processed
+```
 
 ---
 

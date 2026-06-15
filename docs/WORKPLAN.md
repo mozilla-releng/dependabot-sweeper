@@ -7,12 +7,12 @@ the commit/PR.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a maintainer decision first.
 
-> **Status (2026-06-15): PRs #1–#6 are MERGED into `main`** — Phase 0 (validated), Phase 1 (#1),
-> Phase 2 (#2), and the independent Phase-3 items Q12 (#3), Q5/Q6 (#4), Q7 (#5), Q14 (#6). `main`
-> is green (build/test/gofmt/staticcheck). Still open: the **analyser-removal cluster**
-> (3.0/3.2/3.2b/3.3/3.6/3.8 — agentic, needs a verified env; plan below), **Phase 4** (UI, needs a
-> browser session), and the **Phase 5** two-PR-lifecycle doc (lands with the cluster). See
-> `docs/questions.md` for the two maintainer decisions.
+> **Status (2026-06-16): PRs #1–#6 are MERGED into `main`** — Phase 0 (validated), Phase 1 (#1),
+> Phase 2 (#2), and the independent Phase-3 items Q12 (#3), Q5/Q6 (#4), Q7 (#5), Q14 (#6). Phase 5
+> docs are complete (two-PR-type lifecycle section added to ALGORITHM.md). `main` is green
+> (build/test/gofmt/staticcheck). Still open: the **analyser-removal cluster**
+> (3.0/3.2/3.2b/3.3/3.6/3.8 — agentic, needs a verified env; plan below) and **Phase 4** (UI, needs a
+> browser session). See `docs/questions.md` for the two maintainer decisions.
 
 ---
 
@@ -118,11 +118,11 @@ repo). Tick the phase when its items below are done.
   set it from `pr.URL` in the orchestrator, expose it in the web API (`api.ts` type), render the PR
   number in `PrDrawer.svelte` as a link; the pairing reads `replacement_pr` (forward) + `created_prs`
   (reverse, from Q14).
-- [~] **Phase 5 — Docs.** `docs/PRINCIPLES.md` **created** (resolves the dangling reference that
+- [x] **Phase 5 — Docs.** `docs/PRINCIPLES.md` **created** (resolves the dangling reference that
   ALGORITHM.md/memory pointed at; North Star + non-negotiables at current-state UX level, mechanism
-  left to ALGORITHM.md). The **two-PR-type lifecycle section is deferred** to land with Q14's merge
-  (PR #6): documenting the `fix(...)` naming + `created_prs` as current state before that PR merges
-  would describe not-yet-current behaviour. (`spec.go` reconciliation is in the Phase 3.2 cluster.)
+  left to ALGORITHM.md). **Two-PR-type lifecycle section added to ALGORITHM.md** (naming via
+  `SweeperPRTitle`, reap-exempt `created_prs` exclusion, bidirectional pairing, full lifecycle
+  diagram). (`spec.go` reconciliation is in the Phase 3.2 cluster.)
 
 **Cross-cutting (review):**
 - **Tests** for every new gate, extending the existing pure-function test pattern
@@ -264,7 +264,7 @@ The centrepiece is the fix-first rework; the rest support it.
 - [x] **Sweeper-PR naming + tracking (Q14 → DECIDED).** **PR #6.** (1) `SweeperPRTitle` swaps the
   conventional type to `fix` / prepends `fix(deps): ` ✓. (2) reap-exempt `created_prs` table +
   scan exclusion ✓. (3) created→origin reverse link stored (feeds the Phase-4 pairing UI) ✓.
-  (4) doc section — **Phase 5 (pending).** (T12, Q14)
+  (4) doc section — **Phase 5 (done).** (T12, Q14)
 
 ---
 

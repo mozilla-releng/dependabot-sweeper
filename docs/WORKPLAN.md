@@ -74,8 +74,10 @@ tip SHA) was folded in. No Criticals across any round.)_
 Each phase is a checkpoint; substantive code changes go via **draft PRs** with CI watched (public
 repo). Tick the phase when its items below are done.
 
-- [ ] **Phase 0 — Validation experiments** (read-only; de-risk before changing anything).
+- [x] **Phase 0 — Validation experiments** (read-only; de-risk before changing anything).
   Confirm T9 on #193; run the empty-commit-PR test. See *Validation experiments* below.
+  **Done 2026-06-15** — both confirmed; T9 confirmed with a richer-than-expected picture (a
+  `-X theirs` rebase-pollution component, flagged in `docs/questions.md`).
 - [ ] **Phase 1 — Safe independent fixes** (low risk, no design dependencies). T4 stale comment;
   T6/T6a **reporting-noise fix only** (no-op cycle records nothing) — the transition guard is
   deferred to Phase 3 per review C2; dead fields (`ReviewVerdict.Summary`, `BudgetSpent`).
@@ -199,14 +201,32 @@ The centrepiece is the fix-first rework; the rest support it.
 
 ## Validation experiments
 
-- [ ] **Confirm a non-bump PR from the trusted author exits early.** Create a PR from the
-  configured author with an arbitrary change (e.g. an empty commit / no recognisable bump title)
-  and trace it through the workflow. Expected: it never reaches an agent — it's skipped at
-  bump-classification. ⚠️ Current code processes unparseable titles as bump type `unknown`, so this
-  likely *fails* today; Q5's `min-bump-to-engage` skip must treat `unknown`/below-major as skip.
-  Validates that author-filter-only in-scope (Q14) is safe.
-- [ ] **Confirm T9 empirically on petemoore/taskcluster #193** (`c1671f49`): the bloated commit's
-  parent SHA should equal the pre-rebase head (the stale scan-time `pr.HeadSHA`).
+- [x] **Confirm a non-bump PR from the trusted author exits early.** **Done 2026-06-15 (code
+  trace — conclusive; no live PR needed).** Traced `GetDependabotPRs` → `processPR`: an
+  unparseable title from an accepted author takes the `default` branch in `GetDependabotPRs`
+  (`client.go:156-161`) → `BumpUnknown`, `PackageName = title`. In `processPR` the only early
+  bump-type skip is `pr.BumpType == BumpPatch && !pr.Grouped` (`orchestrator.go:236`), so an
+  `unknown` bump is **not** skipped — it proceeds past the stale/settled/SHA gates straight into
+  the analyser (the expensive step). **Confirms the warning: it fails today.** Q5's
+  `min-bump-to-engage` skip must treat `unknown`/below-major as skip (Phase 3.4); `maxGroupedBump`
+  already ranks `unknown` lowest, so `min-bump = major` naturally excludes it. A regression test
+  is authored alongside the Phase 3.4 skip (asserting `unknown` → skipped, never analysed), rather
+  than a now-and-rewrite-later test asserting the current (wrong) behaviour.
+- [x] **Confirm T9 empirically on petemoore/taskcluster #193** (`c1671f49`). **Done 2026-06-15.**
+  The "fix" commit `c1671f49` ("fix: update code for query-string 7.1.1 → 9.3.1 compatibility")
+  bundles **300 files, +27,957 / −42,840** — a genuine query-string compat fix touches ~3. **The
+  T9 symptom is real and present.** Richer picture than the one-line prediction:
+  - The PR's **net** diff (`main`…head) is **clean — 5 files** (changelog, karma.conf.js,
+    package.json, Client.js, yarn.lock). The end-tree is correct.
+  - The **bump** commit `a8f42104` is *also* bloated (300 files; **289 of them outside
+    `clients/client-web`** — `.env`, `.github/*`, `Dockerfile`, `CLAUDE.md`, …). The `-X theirs`
+    Phase-0 rebase against a stale base reverted unrelated `main` files **into the bump commit**;
+    the fix commit then re-applies `main`'s versions (hence net-clean).
+  - So #193's commit-history pollution is dominated by the **rebase**, not solely the stale squash
+    base. The narrow T9 fix (post-rebase tip as squash base) is still correct and should land, but
+    would not by itself clean #193 (the bump tip it bases off is the polluted commit). This is a
+    genuine new problem broader than the Q11-noted `-X theirs` residual — **flagged in
+    `docs/questions.md`** (does not block Phase 2).
 
 ## Smaller / independent items
 

@@ -28,3 +28,16 @@ Format per entry:
   inherit-and-rebase decision is out of scope for autonomous work.
   **Blocked:** nothing — Phase 2 proceeds. This is an FYI + a flagged follow-up, not a blocker.
   **What I did instead:** implemented the Phase 2 narrow fix as planned and recorded this finding.
+
+- **[Phase 3 — within-phase sequencing of autonomous work]** **Not a question — a heads-up on the
+  order I took, for transparency.** The WORKPLAN lists Phase 3 sub-steps 3.0→3.8. The lynchpin is
+  3.2 (remove the separate analyser → single agentic step), and 3.0/3.2b/3.3/3.6/3.8 are tightly
+  coupled to it (they collectively define + implement the new state machine). That cluster is a
+  large, interrelated rework that is risky to leave half-finished (a reconciled `spec.go` that
+  doesn't match the code is *worse* than the current drift). To bank clean, independently-mergeable
+  value first, I implemented the **self-contained, decided** Phase-3 items that do NOT depend on the
+  analyser removal — **Q12 (no-progress metric), Q5/Q6 (min-bump skip + group supersession), Q7
+  (required-checks gating)** — each as its own draft PR. The analyser-removal cluster
+  (3.0/3.2/3.2b/3.3/3.6/3.8) is then tackled as a coherent unit (or left with a written plan if I
+  run out of time), rather than as risky partial PRs. **Nothing is blocked**; the order within
+  Phase 3 is the only deviation, and these items don't rest on 3.2.

@@ -2,6 +2,7 @@ package implementation
 
 import (
 	"errors"
+	"math"
 	"regexp"
 	"strings"
 	"testing"
@@ -156,58 +157,95 @@ func TestDecideCIFixLoop(t *testing.T) {
 }
 
 func TestDecideNoProgress(t *testing.T) {
+	const noFloor = math.MaxInt
 	cases := []struct {
-		name       string
-		blocking   []string
-		prev       []string
-		count      int
-		max        int
-		wantGiveUp bool
-		wantCount  int
+		name                        string
+		blockingCount, floor, stall int
+		maxStall                    int
+		wantGiveUp                  bool
+		wantFloor, wantStall        int
 	}{
-		// First iteration: no previous → reset counter.
-		{"first iter no prev", []string{"lint"}, nil, 0, 3, false, 0},
-		// Blocking changed → counter resets.
-		{"blocking changed", []string{"lint", "test"}, []string{"lint"}, 1, 3, false, 0},
-		// Same set different order → still matches.
-		{"same set diff order", []string{"test", "lint"}, []string{"lint", "test"}, 1, 3, false, 2},
-		// Count increments when same non-empty set.
-		{"same set count increments", []string{"lint"}, []string{"lint"}, 1, 3, false, 2},
-		// Reaches max → give up.
-		{"reaches max", []string{"lint"}, []string{"lint"}, 2, 3, true, 3},
-		// Empty blocking → never give up (CI passed or nothing to fix).
-		{"empty blocking no giveup", []string{}, []string{}, 99, 3, false, 0},
-		// max=1: single consecutive → give up immediately.
-		{"max1 single same", []string{"x"}, []string{"x"}, 0, 1, true, 1},
+		// First call establishes the floor; never gives up.
+		{"first call sets floor", 2, noFloor, 0, 8, false, 2, 0},
+		// Equal count → no improvement → stall increments.
+		{"equal count stalls", 2, 2, 0, 8, false, 2, 1},
+		// Worse count → still no improvement → stall increments, floor unchanged.
+		{"worse count stalls", 3, 2, 4, 8, false, 2, 5},
+		// A strictly lower count is progress → new floor, stall resets.
+		{"new low resets stall", 1, 2, 5, 8, false, 1, 0},
+		// Stall reaches maxStall → give up.
+		{"reaches maxStall", 2, 2, 7, 8, true, 2, 8},
+		// maxStall=1 → one non-improving attempt gives up immediately.
+		{"maxStall1 single stall", 2, 2, 0, 1, true, 2, 1},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			gotGiveUp, gotCount := decideNoProgress(c.blocking, c.prev, c.count, c.max)
-			if gotGiveUp != c.wantGiveUp {
-				t.Errorf("giveUp = %v, want %v", gotGiveUp, c.wantGiveUp)
-			}
-			if gotCount != c.wantCount {
-				t.Errorf("count = %d, want %d", gotCount, c.wantCount)
+			gotGiveUp, gotFloor, gotStall := decideNoProgress(c.blockingCount, c.floor, c.stall, c.maxStall)
+			if gotGiveUp != c.wantGiveUp || gotFloor != c.wantFloor || gotStall != c.wantStall {
+				t.Errorf("decideNoProgress(%d,%d,%d,%d) = (%v,%d,%d), want (%v,%d,%d)",
+					c.blockingCount, c.floor, c.stall, c.maxStall,
+					gotGiveUp, gotFloor, gotStall, c.wantGiveUp, c.wantFloor, c.wantStall)
 			}
 		})
 	}
 }
 
-func TestSameSet(t *testing.T) {
-	if !sameSet([]string{"a", "b"}, []string{"b", "a"}) {
-		t.Error("expected sameSet for same elements different order")
+// driveNoProgress replays a sequence of per-attempt blocking-check counts
+// through decideNoProgress exactly as the CI-fix loop does, returning the
+// 1-based attempt index at which it gives up (or 0 if it never does).
+func driveNoProgress(counts []int, maxStall int) int {
+	floor, stall := math.MaxInt, 0
+	for i, c := range counts {
+		var giveUp bool
+		giveUp, floor, stall = decideNoProgress(c, floor, stall, maxStall)
+		if giveUp {
+			return i + 1
+		}
 	}
-	if sameSet([]string{"a"}, []string{"a", "b"}) {
-		t.Error("expected !sameSet for different lengths")
+	return 0
+}
+
+// TestDecideNoProgressSequences drives the metric over whole sequences — the
+// behaviour that matters operationally. The oscillation case is the Q12 fix:
+// the old exact-set guard never fired on it, so a thrashing worker ran to the
+// global iteration/time cap.
+func TestDecideNoProgressSequences(t *testing.T) {
+	rep := func(v, n int) []int {
+		s := make([]int, n)
+		for i := range s {
+			s[i] = v
+		}
+		return s
 	}
-	if sameSet([]string{"a"}, []string{"b"}) {
-		t.Error("expected !sameSet for different elements")
+	osc := func(a, b, n int) []int {
+		s := make([]int, n)
+		for i := range s {
+			if i%2 == 0 {
+				s[i] = a
+			} else {
+				s[i] = b
+			}
+		}
+		return s
 	}
-	if !sameSet(nil, nil) {
-		t.Error("expected sameSet for two nil slices")
+
+	// Stationary at 2: attempt 1 sets the floor, then 8 non-improving attempts
+	// → give up on attempt 9.
+	if got := driveNoProgress(rep(2, 20), 8); got != 9 {
+		t.Errorf("stationary: gave up at attempt %d, want 9", got)
 	}
-	if sameSet([]string{"a"}, nil) {
-		t.Error("expected !sameSet for nil vs non-empty")
+	// Oscillation 5,4,5,4,…: floor reaches 4 on attempt 2 and never improves; 8
+	// stalls later → give up on attempt 10. The OLD guard never fired here.
+	if got := driveNoProgress(osc(5, 4, 30), 8); got != 10 {
+		t.Errorf("oscillation: gave up at attempt %d, want 10", got)
+	}
+	// Strictly decreasing: genuine progress every attempt → never gives up.
+	if got := driveNoProgress([]int{8, 7, 6, 5, 4, 3, 2, 1}, 8); got != 0 {
+		t.Errorf("monotonic progress: gave up at attempt %d, want 0 (never)", got)
+	}
+	// Progress to a floor of 1 by attempt 4, then stuck → 8 stalls → attempt 12.
+	if got := driveNoProgress(append([]int{4, 3, 2, 1}, rep(1, 20)...), 8); got != 12 {
+		t.Errorf("progress-then-stall: gave up at attempt %d, want 12", got)
 	}
 }
 

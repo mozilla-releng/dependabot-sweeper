@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -461,8 +462,11 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		// still running — we keep waiting rather than resume the worker against
 		// pending checks it cannot fix (Bug #21). Bounded by MaxImplIterations
 		// (resume turns; iter only advances on an actual resume) and MaxImplTime.
-		var prevBlocking []string
-		noProgressCount := 0
+		// No-progress metric (Q12): floor = lowest blocking-check count seen so
+		// far (math.MaxInt = none yet); stall = consecutive settled attempts since
+		// the floor last improved.
+		floor := math.MaxInt
+		stall := 0
 		for iter := 1; ; {
 			ci, settled := p.verifyCI(ctx, branch, ignored)
 			// Update the dashboard's CI snapshot on every poll iteration so the
@@ -507,18 +511,21 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 					Branch:        branch,
 				}
 			}
-			// No-progress guard: if the same set of blocking checks stays red
-			// across MaxNoProgressIterations consecutive resume turns, the worker
-			// cannot fix them — stop spinning (Bug #24).
+			// No-progress guard (Q12): give up once the lowest failing-check count
+			// hasn't improved over MaxNoProgressIterations consecutive settled
+			// attempts. A monotonic floor (not a window over raw counts) so a
+			// worker that thrashes — fix A breaks B, fix B re-breaks A — can't keep
+			// the loop alive forever by oscillating the count; only an actual new
+			// low resets the stall. Subsumes the stationary and oscillating cases.
 			var giveUp bool
-			giveUp, noProgressCount = decideNoProgress(blocking, prevBlocking, noProgressCount, p.config.MaxNoProgressIterations)
+			giveUp, floor, stall = decideNoProgress(len(blocking), floor, stall, p.config.MaxNoProgressIterations)
 			if giveUp {
 				names := strings.Join(blocking, ", ")
 				detail := fmt.Sprintf(
-					"Stopped after the same checks (%s) stayed red across %d fix attempts — likely pre-existing or beyond an automated bump fix. Flagging for review.",
-					names, p.config.MaxNoProgressIterations,
+					"Stopped: the failing-check count stalled at a floor of %d across %d fix attempts without improving (still red: %s) — likely pre-existing or beyond an automated bump fix. Flagging for review.",
+					floor, p.config.MaxNoProgressIterations, names,
 				)
-				slog.Info("No-progress give-up", "pr", pr.Number, "blocking", blocking, "iterations", p.config.MaxNoProgressIterations)
+				slog.Info("No-progress give-up", "pr", pr.Number, "blocking", blocking, "floor", floor, "maxStall", p.config.MaxNoProgressIterations)
 				return RunResult{
 					Success:       false,
 					GaveUp:        true,
@@ -527,7 +534,6 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 					Branch:        branch,
 				}
 			}
-			prevBlocking = blocking
 			slog.Info("CI not yet acceptable — resuming worker with failure logs",
 				"pr", pr.Number, "iter", iter, "blocking", blocking)
 			p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageResuming,
@@ -1060,39 +1066,29 @@ func decideCIFixLoop(ciAcceptable bool, iteration, maxIterations int, elapsedSec
 	}
 }
 
-// decideNoProgress detects a stalled CI-fix loop: if the same non-empty set of
-// blocking check names recurs across consecutive settled iterations, the worker
-// cannot make progress — the checks are likely pre-existing or structurally
-// unfixable by an automated bump. Pure and unit-testable (Bug #24).
+// decideNoProgress detects a stalled CI-fix loop using a monotonic progress
+// metric (Q12, replacing the old exact-set guard). It tracks `floor` — the
+// lowest blocking-check count seen across settled attempts — and `stall`, the
+// number of consecutive settled attempts since `floor` last improved. It reports
+// give-up once `stall` reaches `maxStall`.
 //
-// blocking and prevBlocking are compared as sets (order-insensitive). When they
-// match AND blocking is non-empty, count is incremented; otherwise it resets to
-// zero. giveUp is true when count reaches max.
-func decideNoProgress(blocking, prevBlocking []string, count, max int) (giveUp bool, newCount int) {
-	if len(blocking) == 0 || !sameSet(blocking, prevBlocking) {
-		return false, 0
+// A monotonic floor (rather than a sliding window over raw counts) cannot be
+// gamed by up-down oscillation: a worker that thrashes 5→4→5→4 never lowers the
+// floor below 4, so `stall` keeps climbing and the loop still terminates. This
+// subsumes both the stationary-stuck-set case and the oscillating-thrash case
+// the old exact-set guard missed (T10/Q12). Pure and unit-testable.
+//
+// Call with floor=math.MaxInt and stall=0 initially. blockingCount is the number
+// of genuinely-blocking checks this settled attempt (len(blocking)); it is ≥1
+// here, since the loop only reaches this point when CI settled but was not
+// acceptable. The first call always records a new floor (no give-up), so a
+// give-up means maxStall consecutive *non-improving* attempts after the best low.
+func decideNoProgress(blockingCount, floor, stall, maxStall int) (giveUp bool, newFloor, newStall int) {
+	if blockingCount < floor {
+		return false, blockingCount, 0 // progress: a new low resets the stall
 	}
-	count++
-	return count >= max, count
-}
-
-// sameSet reports whether a and b contain the same elements regardless of
-// order. Used by decideNoProgress to compare blocking-check sets across turns.
-func sameSet(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	m := make(map[string]int, len(a))
-	for _, s := range a {
-		m[s]++
-	}
-	for _, s := range b {
-		m[s]--
-		if m[s] < 0 {
-			return false
-		}
-	}
-	return true
+	stall++ // no improvement (equal or worse)
+	return stall >= maxStall, floor, stall
 }
 
 // verifyCI waits until the branch's CI has SETTLED (every check terminal or

@@ -78,14 +78,17 @@ repo). Tick the phase when its items below are done.
   Confirm T9 on #193; run the empty-commit-PR test. See *Validation experiments* below.
   **Done 2026-06-15** — both confirmed; T9 confirmed with a richer-than-expected picture (a
   `-X theirs` rebase-pollution component, flagged in `docs/questions.md`).
-- [ ] **Phase 1 — Safe independent fixes** (low risk, no design dependencies). T4 stale comment;
-  T6/T6a **reporting-noise fix only** (no-op cycle records nothing) — the transition guard is
-  deferred to Phase 3 per review C2; dead fields (`ReviewVerdict.Summary`, `BudgetSpent`).
-- [ ] **Phase 2 — T9 narrow fix** (squash base = post-rebase branch tip; **store the SHA on a
-  struct field** so Q13's curate and the reviewer-diff can reuse it — review M4; **also return it
-  in `RunResult`** so the orchestrator's gave_up path can record the outcome against it, not the
-  scan-time `pr.HeadSHA` — review N4/MAJOR-1; leave all other `recordOutcome` calls on `pr.HeadSHA`).
-  Small but serious.
+- [x] **Phase 1 — Safe independent fixes** (low risk, no design dependencies). **PR #1 (draft).**
+  T4 stale comment ✓; T6/T6a **reporting-noise fix only** (no-op cycle records nothing) ✓ — the
+  transition guard is deferred to Phase 3 per review C2. Dead fields (`ReviewVerdict.Summary`,
+  `BudgetSpent`) **deliberately deferred** to their owning phases (Summary → Q15/Phase 3.8 replaces
+  it; BudgetSpent → billing backlog) rather than removed-then-re-added.
+- [x] **Phase 2 — T9 narrow fix** (squash base = post-rebase branch tip ✓; **stored on a struct
+  field** `Pipeline.bumpTipSHA` reused by the squash and the reviewer-diff — review M4 ✓; **also
+  returned in `RunResult.TipSHA`** and the orchestrator's gave_up path records the outcome (+ sticky
+  comment marker) against it via `terminalSHA()` — review N4/MAJOR-1 ✓; all other `recordOutcome`
+  calls left on `pr.HeadSHA`). **PR #2 (draft).** ⚠️ Phase-0 surfaced a `-X theirs` rebase-pollution
+  component this narrow fix doesn't fully clean — see `docs/questions.md`.
 - [ ] **Phase 3 — Core rework** (large, interrelated; sequence as its own PRs in this order):
   0. Reconcile `spec.go` to the post-Q10 state machine FIRST (review C2), so the transition guard
      is authored against the final graph.
@@ -123,25 +126,22 @@ supporting features); Phases 4–5 are polish and durable documentation.
 
 ## Confirmed bugs
 
-- [ ] **T9 — Squash bundles unrelated `main` changes into the "fix" commit.** Squash resets to
-  the stale scan-time `pr.HeadSHA` after a Phase-0 rebase. **Fix (decided):** reset to the branch
-  tip captured right after `checkout -b branch pr.HeadRef`, before the agent runs. (Q11 kept
-  inherit-and-rebase, so this narrow fix is the chosen one.) **Store the SHA on a struct field**
-  (review M4) — it's the single canonical base for the squash, the Q13 curate, AND the reviewer
-  diff (which currently uses the ref *name* `origin/<HeadRef>`, same stale-ref hazard). Serious.
-  Confirm empirically on petemoore/taskcluster #193 (`c1671f49`): bloated commit's parent should
-  equal the pre-rebase head.
-- [ ] **T6 / T6a — Decision graph not enforced + idempotent skips pollute history. (Q8 → c: both,
-  SPLIT across phases — review C2.)** (1) **Phase 1:** reporting-noise fix — a no-op cycle records
-  **nothing**: remove the `pending` re-stamp in `Run`'s pre-populate loop and at the top of
-  `processPR`, **and the skip-path terminal re-stamp** (`orchestrator.go:347-357` — review N1);
-  the dashboard reads the stored stage from the row. (No `finalized→finalized` self-loop is then
-  emitted, so the guard needs no self-loop exception.) (2) **Phase 3 (after spec.go reconciled):**
-  runtime guard — `Report(stage)` validates against the post-Q10 graph, rejects/loud-logs illegal
-  transitions; collapse non-stage nodes following **both decision AND back edges** (review N2 — or
-  it rejects legal resume loops). Cost-safety-critical.
-- [ ] **T4 — Stale `spec.go` comment** on the `gave_up` node still claims it routes to
-  `flagged_human` (Bug #24 era). Behaviour is correct; just fix the comment.
+- [x] **T9 — Squash bundles unrelated `main` changes into the "fix" commit.** **Done — PR #2
+  (draft).** Reset base is now the branch tip captured right after `checkout -b branch pr.HeadRef`
+  (`Pipeline.bumpTipSHA`), reused by the squash AND the reviewer diff/commit listing (was the stale
+  ref name `origin/<HeadRef>` — MINOR-1). Q11 kept inherit-and-rebase. Confirmed empirically on
+  petemoore/taskcluster #193 in Phase 0 (the "fix" commit bundled 300 files). The squash-base fix
+  is validated by a git-integration test (`TestSquashBranchUsesCapturedTipNotStaleBase`).
+- [~] **T6 / T6a — Decision graph not enforced + idempotent skips pollute history. (Q8 → c: both,
+  SPLIT across phases — review C2.)** (1) **Phase 1 — DONE, PR #1:** reporting-noise fix — a no-op
+  cycle records **nothing**: `prepopulate()` stamps `pending` only for unseen PRs (preserving row
+  creation), and the `processPR`-top + skip-path re-stamps are removed; the dashboard reads the
+  stored stage from the row. (No `finalized→finalized` self-loop is then emitted.) (2) **Phase 3
+  (after spec.go reconciled) — TODO:** runtime guard — `Report(stage)` validates against the
+  post-Q10 graph, rejects/loud-logs illegal transitions; collapse non-stage nodes following
+  **both decision AND back edges** (review N2). Cost-safety-critical.
+- [x] **T4 — Stale `spec.go` comment** on the `gave_up` node. **Done — PR #1.** Comment now
+  describes the correct current behaviour (records `gave_up` sticky at the head SHA).
 - [ ] **T12 — Re-ingestion risk (Q14 → DECIDED):** exclude the tool's own PRs via a DB record of
   what it created (never a branch-name/title heuristic — branch names are attacker-spoofable).
   ⚠️ **Must be a reap-exempt table (review C1)** — NOT a `pr_progress` column, which `Store.Reap`

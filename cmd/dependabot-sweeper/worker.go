@@ -40,6 +40,7 @@ type workerOptions struct {
 	ciStaleness            time.Duration
 	botName                string
 	botEmail               string
+	minBumpToEngage        string
 }
 
 func parseWorkerFlags(args []string) (*workerOptions, error) {
@@ -73,6 +74,7 @@ func parseWorkerFlags(args []string) (*workerOptions, error) {
 	fs.DurationVar(&o.ciStaleness, "ci-staleness", 12*time.Hour, "a CI check pending longer than this (from creation) is treated as stale")
 	fs.StringVar(&o.botName, "bot-name", "dependabot-helper", "git committer name for implementation commits")
 	fs.StringVar(&o.botEmail, "bot-email", "dependabot-helper@users.noreply.github.com", "git committer email for implementation commits")
+	fs.StringVar(&o.minBumpToEngage, "min-bump-to-engage", "major", "Lowest bump severity to engage (major|minor|patch); bumps below it are skipped out of policy")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
@@ -98,6 +100,7 @@ func buildWorkerConfig(o *workerOptions) (*config.Config, error) {
 		config.WithCIStaleness(o.ciStaleness),
 		config.WithBotName(o.botName),
 		config.WithBotEmail(o.botEmail),
+		config.WithMinBumpToEngage(models.BumpType(o.minBumpToEngage)),
 	}
 	if o.implModel != "" {
 		opts = append(opts, config.WithImplModel(o.implModel))

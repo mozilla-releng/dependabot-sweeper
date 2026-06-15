@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/mozilla-releng/dependabot-sweeper/internal/models"
 )
 
 // Config holds all configuration for the pipeline.
@@ -31,6 +33,13 @@ type Config struct {
 	CIStaleness time.Duration // a check pending longer than this (from creation) is "stale"
 	BotName     string        // git committer identity for impl commits
 	BotEmail    string
+
+	// MinBumpToEngage is the per-repo policy: the lowest bump severity the tool
+	// engages. Bumps below it are skipped out of policy (recorded on the
+	// dashboard). Default `major` — for taskcluster, dependabot auto-merges
+	// passing patch/minor, so only majors need the tool. Compared via
+	// models.BumpRank, so `major` also skips `unknown` (Q5).
+	MinBumpToEngage models.BumpType
 }
 
 // FromEnv creates a Config from environment variables and optional .env file.
@@ -85,6 +94,9 @@ func FromEnv(opts ...Option) (*Config, error) {
 	if cfg.BotEmail == "" {
 		cfg.BotEmail = "dependabot-helper@users.noreply.github.com"
 	}
+	if cfg.MinBumpToEngage == "" {
+		cfg.MinBumpToEngage = models.BumpMajor
+	}
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -121,6 +133,15 @@ func (c *Config) validate() error {
 	}
 	if err := validateThinkingBudget("--reviewer-thinking-budget", c.ReviewerThinkingBudget); err != nil {
 		return err
+	}
+	// The engage threshold must be a recognised, engageable bump severity.
+	// `unknown` is rejected: it isn't a threshold one would set (it ranks below
+	// patch and would engage everything), it's the catch-all for unparseable
+	// titles, which the threshold's job is to *skip*.
+	switch c.MinBumpToEngage {
+	case models.BumpMajor, models.BumpMinor, models.BumpPatch:
+	default:
+		return fmt.Errorf("--min-bump-to-engage must be one of major|minor|patch, got %q", c.MinBumpToEngage)
 	}
 	return nil
 }
@@ -162,6 +183,9 @@ func WithCIVerifyMaxWait(v int) Option       { return func(c *Config) { c.CIVeri
 func WithCIStaleness(v time.Duration) Option { return func(c *Config) { c.CIStaleness = v } }
 func WithBotName(v string) Option            { return func(c *Config) { c.BotName = v } }
 func WithBotEmail(v string) Option           { return func(c *Config) { c.BotEmail = v } }
+func WithMinBumpToEngage(b models.BumpType) Option {
+	return func(c *Config) { c.MinBumpToEngage = b }
+}
 
 // loadDotenv loads a .env file from the current directory, if present.
 // Existing environment variables are not overridden.

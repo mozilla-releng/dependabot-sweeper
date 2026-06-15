@@ -130,6 +130,33 @@ func TestGaveUpSkipFiresAfterRebase(t *testing.T) {
 	}
 }
 
+// TestBelowMinBump covers the Q5 engage-threshold decision, including the
+// Phase-0 finding that an unknown-bump PR must be skipped under the default.
+func TestBelowMinBump(t *testing.T) {
+	cases := []struct {
+		bump, min models.BumpType
+		want      bool
+	}{
+		// Default threshold = major.
+		{models.BumpUnknown, models.BumpMajor, true}, // Phase-0: non-bump PRs are skipped
+		{models.BumpPatch, models.BumpMajor, true},
+		{models.BumpMinor, models.BumpMajor, true},
+		{models.BumpMajor, models.BumpMajor, false},
+		// Threshold = minor.
+		{models.BumpPatch, models.BumpMinor, true},
+		{models.BumpMinor, models.BumpMinor, false},
+		{models.BumpMajor, models.BumpMinor, false},
+		// Threshold = patch (engage everything parseable; unknown still skipped).
+		{models.BumpUnknown, models.BumpPatch, true},
+		{models.BumpPatch, models.BumpPatch, false},
+	}
+	for _, c := range cases {
+		if got := belowMinBump(c.bump, c.min); got != c.want {
+			t.Errorf("belowMinBump(%q, %q) = %v, want %v", c.bump, c.min, got, c.want)
+		}
+	}
+}
+
 func TestReportStageWritesToStore(t *testing.T) {
 	s := state.NewStore()
 	o := Orchestrator{store: s}

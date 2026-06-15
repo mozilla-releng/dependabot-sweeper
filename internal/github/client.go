@@ -347,6 +347,54 @@ func FindNewerPRForPackage(currentPR models.DependabotPR, allPRs []models.Depend
 	return best
 }
 
+// FindSupersedingGroup returns the grouped PR in allPRs that already covers
+// currentPR's package at a version >= currentPR.NewVersion, making the
+// individual PR redundant (Q6). If several groups qualify, the one covering the
+// highest version is returned. Returns nil when:
+//   - currentPR is itself a grouped PR (an individual never closes a group, and
+//     a group is not superseded this way),
+//   - currentPR.NewVersion doesn't parse as semver (no confident comparison), or
+//   - no open group covers the package at >= that version.
+//
+// The direction is asymmetric by design (Q6): a group can supersede an
+// individual, but an individual never closes a whole group — the group still
+// bumps its other members. Package match is exact string equality, mirroring
+// FindNewerPRForPackage. Members are read from the group's already-parsed
+// GroupedUpdates table.
+func FindSupersedingGroup(currentPR models.DependabotPR, allPRs []models.DependabotPR) *models.DependabotPR {
+	if currentPR.Grouped {
+		return nil
+	}
+	currentVer, ok := parseSemver(currentPR.NewVersion)
+	if !ok {
+		return nil // can't compare; be conservative and leave it open.
+	}
+
+	var best *models.DependabotPR
+	var bestVer [3]int
+	for i := range allPRs {
+		g := &allPRs[i]
+		if !g.Grouped || g.Number == currentPR.Number {
+			continue
+		}
+		for _, m := range g.GroupedUpdates {
+			if m.Name != currentPR.PackageName {
+				continue
+			}
+			ver, ok := parseSemver(m.To)
+			if !ok || compareSemver(ver, currentVer) < 0 {
+				continue // group covers it at a LOWER version → keep the individual.
+			}
+			// Group covers the package at >= the individual's version → supersedes.
+			if best == nil || compareSemver(ver, bestVer) > 0 {
+				best = g
+				bestVer = ver
+			}
+		}
+	}
+	return best
+}
+
 // compareSemver returns -1 if a < b, 0 if a == b, 1 if a > b. Operates on
 // the [major, minor, patch] tuples returned by parseSemver.
 func compareSemver(a, b [3]int) int {

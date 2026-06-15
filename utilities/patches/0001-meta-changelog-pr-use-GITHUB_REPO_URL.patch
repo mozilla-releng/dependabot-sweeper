@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: dependabot-sweeper testbed <noreply@example.com>
+Date: Tue, 10 Jun 2026 00:00:00 +0000
+Subject: [PATCH] fix(changelog): use GITHUB_REPO_URL instead of hardcoded upstream repo
+
+The changelog:check --pr task fetches PR file lists from the GitHub API to
+determine whether any non-trivial files changed. It has the repo owner/name
+hardcoded as 'taskcluster'/'taskcluster', which causes incorrect results when
+running against a fork: the PR number on the fork is used to look up a PR on
+the upstream repo, which is either a completely different PR or does not exist.
+
+GITHUB_REPO_URL is already propagated to child tasks by
+taskcluster/src/transforms/__init__.py (via config.params["head_repository"]).
+Use it to derive the owner/repo dynamically so the check queries the actual
+repository.
+
+---
+ infrastructure/tooling/src/changelog/index.js | 8 +++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/infrastructure/tooling/src/changelog/index.js b/infrastructure/tooling/src/changelog/index.js
+--- a/infrastructure/tooling/src/changelog/index.js
++++ b/infrastructure/tooling/src/changelog/index.js
+@@ -242,9 +242,15 @@
+
+ const check_pr = async (pr) => {
+   const octokit = new Octokit();
++  // GITHUB_REPO_URL is injected by taskcluster/src/transforms/__init__.py and
++  // resolves to the head repository URL. Use it to query the right repo/PR
++  // instead of the hardcoded upstream so this works on forks.
++  const repoSlug = (process.env.GITHUB_REPO_URL || 'https://github.com/taskcluster/taskcluster')
++    .replace(/^https?:\/\/github\.com\//, '').replace(/\/$/, '');
++  const [repoOwner, repoName] = repoSlug.split('/');
+   const options = octokit.pulls.listFiles.endpoint.merge({
+-    owner: 'taskcluster',
+-    repo: 'taskcluster',
++    owner: repoOwner,
++    repo: repoName,
+     pull_number: pr,
+   });
+   const files = await octokit.paginate(options,

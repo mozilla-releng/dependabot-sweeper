@@ -9,6 +9,9 @@
 # Environment
 .env
 
+# Per-user test-bed/deploy config (fork, GCP project, dashboard) — never committed
+utilities/sweeper.env
+
 # Node (SPA dev tooling — dist/ is committed; node_modules/ is generated)
 internal/web/ui/node_modules/
 

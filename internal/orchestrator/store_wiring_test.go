@@ -157,6 +157,40 @@ func TestBelowMinBump(t *testing.T) {
 	}
 }
 
+// TestExcludeOwnPRs is the Q14/C1 regression: a PR the tool created (recorded in
+// the reap-exempt table) is dropped from the scan set, so it can't be
+// re-ingested and re-processed as a fresh dependabot PR.
+func TestExcludeOwnPRs(t *testing.T) {
+	s := state.NewStore()
+	o := Orchestrator{store: s}
+	s.RecordCreatedPR(204, 100) // we created sweeper PR 204 for dependabot PR 100
+
+	in := []models.DependabotPR{{Number: 100}, {Number: 204}, {Number: 300}}
+	got := o.excludeOwnPRs(in)
+
+	if len(got) != 2 {
+		t.Fatalf("excludeOwnPRs kept %d PRs, want 2 (204 excluded)", len(got))
+	}
+	for _, pr := range got {
+		if pr.Number == 204 {
+			t.Errorf("our own PR #204 was not excluded")
+		}
+	}
+}
+
+// TestExcludeOwnPRsNilStoreSafe / no-created cases must pass through unchanged.
+func TestExcludeOwnPRsPassThrough(t *testing.T) {
+	in := []models.DependabotPR{{Number: 1}, {Number: 2}}
+
+	var nilStore Orchestrator
+	if got := nilStore.excludeOwnPRs(in); len(got) != 2 {
+		t.Errorf("nil store: kept %d, want 2 (pass-through)", len(got))
+	}
+	o := Orchestrator{store: state.NewStore()} // store with no created PRs
+	if got := o.excludeOwnPRs(in); len(got) != 2 {
+		t.Errorf("empty created set: kept %d, want 2 (pass-through)", len(got))
+	}
+}
 func TestReportStageWritesToStore(t *testing.T) {
 	s := state.NewStore()
 	o := Orchestrator{store: s}

@@ -266,7 +266,44 @@ func (s *Store) SetOutcome(prNumber int, headSHA, outcome string) {
 	)
 }
 
+// RecordCreatedPR records that the tool opened sweeper PR createdPR for origin
+// dependabot PR originPR. Written to the reap-exempt created_prs table so it
+// permanently excludes the tool's own PRs from future scans (Q14 / review C1).
+// Idempotent via INSERT OR REPLACE.
+func (s *Store) RecordCreatedPR(createdPR, originPR int) {
+	_, err := s.db.Exec(`
+		INSERT INTO created_prs (pr_number, origin_pr, created_at)
+		VALUES (?, ?, ?)
+		ON CONFLICT(pr_number) DO UPDATE SET origin_pr = excluded.origin_pr`,
+		createdPR, originPR, toUnixNano(time.Now()),
+	)
+	if err != nil {
+		slog.Error("sqlitestore: failed to record created PR", "pr", createdPR, "origin", originPR, "error", err)
+	}
+}
+
 // ---- Reader methods -------------------------------------------------------
+
+// CreatedPRs returns the created-PR → origin-PR map from the reap-exempt
+// created_prs table. Empty map on any error (callers treat it as "exclude
+// nothing extra", which is safe — the author filter still applies).
+func (s *Store) CreatedPRs() map[int]int {
+	out := make(map[int]int)
+	rows, err := s.db.Query(`SELECT pr_number, origin_pr FROM created_prs`)
+	if err != nil {
+		slog.Error("sqlitestore: failed to read created_prs", "error", err)
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var createdPR, originPR int
+		if err := rows.Scan(&createdPR, &originPR); err != nil {
+			continue
+		}
+		out[createdPR] = originPR
+	}
+	return out
+}
 
 // Get returns a deep copy of a PR's progress and whether it exists.
 func (s *Store) Get(prNumber int) (models.PRProgress, bool) {

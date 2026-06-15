@@ -39,6 +39,15 @@ type Writer interface {
 	// at the same headSHA can skip re-processing via a DB lookup. No-op when
 	// headSHA is empty (used for retriable/transient outcomes).
 	SetOutcome(prNumber int, headSHA, outcome string)
+
+	// RecordCreatedPR records that the tool itself opened replacement PR
+	// createdPR (the sweeper "fix" PR) for origin dependabot PR originPR. These
+	// records are PERMANENT and reap-exempt: they must survive Store.Reap, which
+	// prunes pr_progress rows each cycle — otherwise our own PR could be
+	// re-ingested and re-processed as a fresh dependabot PR, a runaway-cost
+	// incident (Q14 / review C1). The exclusion is the cost-safety backstop to
+	// the author filter, not a branch-name heuristic (branch names are spoofable).
+	RecordCreatedPR(createdPR, originPR int)
 }
 
 // ReadWriter combines Writer and Reader. Used by the orchestrator so it can
@@ -53,6 +62,12 @@ type ReadWriter interface {
 type Reader interface {
 	All() []models.PRProgress
 	Get(prNumber int) (models.PRProgress, bool)
+
+	// CreatedPRs returns the set of PRs the tool created, mapping each sweeper
+	// "fix" PR number to its origin dependabot PR number. The orchestrator uses
+	// the keys to exclude its own PRs from scans (Q14); the dashboard can use the
+	// origin values to render and navigate the dependabot↔sweeper pairing.
+	CreatedPRs() map[int]int
 }
 
 // Notifier delivers change notifications to SSE subscribers. The in-memory

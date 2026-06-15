@@ -15,7 +15,7 @@ import (
 // commit is visible to the web process's connection within one poll interval.
 //
 // On a detected change the Notifier broadcasts to all subscribers using the
-// same buffered-size-1 non-blocking fan-out as state.Store, so existing SSE
+// same buffered-size-1 non-blocking fan-out, so existing SSE
 // clients receive an "event: update" and re-fetch — the browser contract is
 // unchanged.
 //
@@ -98,7 +98,7 @@ func (n *Notifier) Run(ctx context.Context) error {
 }
 
 // broadcast does a non-blocking send to every subscriber. A slow reader misses
-// the tick and catches up on the next one — this is intentional (same as state.Store).
+// the tick and catches up on the next one — this is intentional.
 func (n *Notifier) broadcast() {
 	n.mu.RLock()
 	for ch := range n.subs {

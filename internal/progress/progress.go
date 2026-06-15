@@ -1,15 +1,14 @@
 // Package progress defines the storage abstraction for live PR progress.
 // It is depended on by the orchestrator, implementation pipeline, web server,
 // service, and sqlitestore packages — it imports only models so none of those
-// form a cycle. Two implementations exist: internal/state (in-memory, for
-// tests and the one-shot "review" command) and internal/sqlitestore (SQLite,
+// form a cycle. The production implementation is internal/sqlitestore (SQLite,
 // for the "worker"/"web" daemon split).
 package progress
 
 import "github.com/mozilla-releng/dependabot-sweeper/internal/models"
 
-// Writer records PR progress. Implemented by the in-memory state.Store and the
-// SQLite store. The orchestrator and implementation pipeline hold a Writer.
+// Writer records PR progress. Implemented by sqlitestore.Store.
+// The orchestrator and implementation pipeline hold a Writer.
 type Writer interface {
 	Report(prNumber int, pkg, bump string, stage models.PRStage, detail string)
 	SetImplMeta(prNumber int, sessionID, worktreePath, branch string)
@@ -52,7 +51,7 @@ type Writer interface {
 
 // ReadWriter combines Writer and Reader. Used by the orchestrator so it can
 // both write progress updates and read back stored outcomes for idempotency
-// (Bug #23). Both sqlitestore.Store and state.Store satisfy this interface.
+// (Bug #23). sqlitestore.Store satisfies this interface.
 type ReadWriter interface {
 	Writer
 	Reader
@@ -70,9 +69,8 @@ type Reader interface {
 	CreatedPRs() map[int]int
 }
 
-// Notifier delivers change notifications to SSE subscribers. The in-memory
-// store broadcasts in-process; the SQLite reader's notifier is driven by a
-// data_version poller that detects commits made by the writer process.
+// Notifier delivers change notifications to SSE subscribers. sqlitestore.Notifier
+// is driven by a data_version poller that detects commits made by the writer process.
 type Notifier interface {
 	Subscribe() chan struct{}
 	Unsubscribe(ch chan struct{})

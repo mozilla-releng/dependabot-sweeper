@@ -33,8 +33,6 @@ func openAt(t *testing.T, path string, writer bool) *Store {
 	return s
 }
 
-// — behavioral parity with internal/state/store_test.go —
-
 func TestReportCreatesAndAppendsHistory(t *testing.T) {
 	s := openWriter(t)
 	s.Report(42, "lodash", "minor", models.StagePending, "")
@@ -81,6 +79,7 @@ func TestGetReturnsCopyNotAlias(t *testing.T) {
 	got, _ := s.Get(1)
 	got.History[0].Detail = "mutated by caller"
 	got.Stage = models.StageError
+	_ = got.Stage // mutation under test; verify isolation via again below
 
 	again, _ := s.Get(1)
 	if again.History[0].Detail == "mutated by caller" {
@@ -206,12 +205,11 @@ func TestConcurrentWritesSerialized(t *testing.T) {
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
-		g := g
+	for g := range goroutines {
 		go func() {
 			defer wg.Done()
 			prNum := g + 1
-			for i := 0; i < reportsEach; i++ {
+			for i := range reportsEach {
 				stage := models.StagePending
 				if i%2 == 1 {
 					stage = models.StageAnalysing

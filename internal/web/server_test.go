@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/mozilla-releng/dependabot-sweeper/internal/models"
-	"github.com/mozilla-releng/dependabot-sweeper/internal/state"
+	"github.com/mozilla-releng/dependabot-sweeper/internal/progress"
 )
 
 // stubStatus is a fixed StatusProvider for tests.
@@ -25,10 +27,123 @@ func (stubStatus) Status() Status {
 	}
 }
 
-func newTestServer(t *testing.T) (*Server, *state.Store) {
+// testStore is a minimal in-memory progress.Reader + progress.Notifier used
+// only by web server tests to avoid an import cycle (sqlitestore imports web).
+type testStore struct {
+	mu   sync.RWMutex
+	prs  map[int]*models.PRProgress
+	subs map[chan struct{}]struct{}
+}
+
+var (
+	_ progress.Reader   = (*testStore)(nil)
+	_ progress.Notifier = (*testStore)(nil)
+)
+
+func newTestStore() *testStore {
+	return &testStore{
+		prs:  make(map[int]*models.PRProgress),
+		subs: make(map[chan struct{}]struct{}),
+	}
+}
+
+func (s *testStore) Report(prNumber int, pkg, bump string, stage models.PRStage, detail string) {
+	s.mu.Lock()
+	p, ok := s.prs[prNumber]
+	if !ok {
+		p = &models.PRProgress{PRNumber: prNumber, PackageName: pkg, BumpType: bump}
+		s.prs[prNumber] = p
+	}
+	p.Stage = stage
+	p.LastUpdated = time.Now()
+	p.History = append(p.History, models.StageEvent{Stage: stage, At: time.Now(), Detail: detail})
+	s.mu.Unlock()
+	s.broadcast()
+}
+
+func (s *testStore) SetVersions(prNumber int, oldVer, newVer, ecosystem string) {
+	s.mu.Lock()
+	if p, ok := s.prs[prNumber]; ok {
+		p.OldVersion = oldVer
+		p.NewVersion = newVer
+		p.Ecosystem = ecosystem
+	}
+	s.mu.Unlock()
+}
+
+func (s *testStore) SetCI(prNumber int, ci models.CIStatus) {
+	s.mu.Lock()
+	if p, ok := s.prs[prNumber]; ok {
+		cp := ci
+		p.CI = &cp
+	}
+	s.mu.Unlock()
+}
+
+func (s *testStore) SetAnalysis(prNumber int, a models.AgentAnalysis) {
+	s.mu.Lock()
+	if p, ok := s.prs[prNumber]; ok {
+		cp := a
+		p.Analysis = &cp
+	}
+	s.mu.Unlock()
+}
+
+func (s *testStore) Get(prNumber int) (models.PRProgress, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.prs[prNumber]
+	if !ok {
+		return models.PRProgress{}, false
+	}
+	return *p, true // shallow copy: slice fields share the underlying array; fine here as the server never mutates returned values
+}
+
+func (s *testStore) All() []models.PRProgress {
+	s.mu.RLock()
+	out := make([]models.PRProgress, 0, len(s.prs))
+	for _, p := range s.prs {
+		cp := *p
+		out = append(out, cp)
+	}
+	s.mu.RUnlock()
+	sort.Slice(out, func(i, j int) bool { return out[i].PRNumber < out[j].PRNumber })
+	return out
+}
+
+func (s *testStore) CreatedPRs() map[int]int { return nil }
+
+func (s *testStore) Subscribe() chan struct{} {
+	ch := make(chan struct{}, 1)
+	s.mu.Lock()
+	s.subs[ch] = struct{}{}
+	s.mu.Unlock()
+	return ch
+}
+
+func (s *testStore) Unsubscribe(ch chan struct{}) {
+	s.mu.Lock()
+	if _, ok := s.subs[ch]; ok {
+		delete(s.subs, ch)
+		close(ch)
+	}
+	s.mu.Unlock()
+}
+
+func (s *testStore) broadcast() {
+	s.mu.RLock()
+	for ch := range s.subs {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+	s.mu.RUnlock()
+}
+
+func newTestServer(t *testing.T) (*Server, *testStore) {
 	t.Helper()
-	s := state.NewStore()
-	// *state.Store satisfies progress.Reader and progress.Notifier; pass it as both.
+	s := newTestStore()
 	srv := NewServer(s, s, stubStatus{}, filepath.Join(os.TempDir(), "sweeper-agent-logs"), "localhost:0")
 	return srv, s
 }
@@ -125,7 +240,7 @@ func TestLogTailReturnsLastLines(t *testing.T) {
 	}
 	logPath := filepath.Join(dir, "pr-77-agent.jsonl")
 	var b []byte
-	for i := 0; i < 300; i++ {
+	for i := range 300 {
 		b = append(b, []byte(`{"line":`+itoa(i)+"}\n")...)
 	}
 	if err := os.WriteFile(logPath, b, 0o644); err != nil {

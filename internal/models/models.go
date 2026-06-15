@@ -385,10 +385,9 @@ type StageEvent struct {
 	Detail string    `json:"detail"`
 }
 
-// PRProgress is the live, in-memory view of one PR moving through the pipeline.
-// It is mutated only via state.Store (which holds the lock); callers receive
-// value copies from Store.Get/Store.All, so PRProgress itself carries no
-// synchronisation.
+// PRProgress is the persisted view of one PR moving through the pipeline.
+// Callers receive value copies from Store.Get/Store.All, so PRProgress itself
+// carries no synchronisation.
 type PRProgress struct {
 	PRNumber    int     `json:"pr_number"`
 	PackageName string  `json:"package_name"`

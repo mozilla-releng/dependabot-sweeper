@@ -1,12 +1,23 @@
 package orchestrator
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/mozilla-releng/dependabot-sweeper/internal/models"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/progress"
-	"github.com/mozilla-releng/dependabot-sweeper/internal/state"
+	"github.com/mozilla-releng/dependabot-sweeper/internal/sqlitestore"
 )
+
+func openTestStore(t *testing.T) *sqlitestore.Store {
+	t.Helper()
+	s, err := sqlitestore.Open(filepath.Join(t.TempDir(), "test.db"), true)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
 
 func TestReportStageNilSafe(t *testing.T) {
 	var o Orchestrator // store is nil
@@ -25,7 +36,7 @@ func TestPrepopulateNilStoreSafe(t *testing.T) {
 // `pending` only for PRs the store has not seen, and never re-stamps an already
 // tracked (often terminal) PR — so a no-op cycle records no new transition.
 func TestPrepopulateStampsNewPRsOnce(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 
 	prs := []models.DependabotPR{
@@ -107,7 +118,7 @@ func TestGaveUpSkipFiresAfterRebase(t *testing.T) {
 	const tipSHA = "sha-post-rebase" // branch head after the Phase-0 rebase
 	const nextScanSHA = tipSHA       // next cycle sees the rebased head
 
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 	s.Report(prNumber, "webpack", "major", models.StagePending, "")
 
@@ -161,7 +172,7 @@ func TestBelowMinBump(t *testing.T) {
 // the reap-exempt table) is dropped from the scan set, so it can't be
 // re-ingested and re-processed as a fresh dependabot PR.
 func TestExcludeOwnPRs(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 	s.RecordCreatedPR(204, 100) // we created sweeper PR 204 for dependabot PR 100
 
@@ -186,13 +197,13 @@ func TestExcludeOwnPRsPassThrough(t *testing.T) {
 	if got := nilStore.excludeOwnPRs(in); len(got) != 2 {
 		t.Errorf("nil store: kept %d, want 2 (pass-through)", len(got))
 	}
-	o := Orchestrator{store: state.NewStore()} // store with no created PRs
+	o := Orchestrator{store: openTestStore(t)} // store with no created PRs
 	if got := o.excludeOwnPRs(in); len(got) != 2 {
 		t.Errorf("empty created set: kept %d, want 2 (pass-through)", len(got))
 	}
 }
 func TestReportStageWritesToStore(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 	o.reportStage(1, "pkg", "minor", models.StageAnalysing, "calling claude")
 	got, ok := s.Get(1)
@@ -208,7 +219,7 @@ func TestReportStageWritesToStore(t *testing.T) {
 }
 
 func TestWithStoreSetsField(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := &Orchestrator{}
 	o.WithStore(s)
 	if o.store != s {
@@ -219,8 +230,8 @@ func TestWithStoreSetsField(t *testing.T) {
 // TestWithStoreAcceptsReadWriter verifies that WithStore accepts anything that
 // satisfies progress.ReadWriter (compile-time + interface-assignment check).
 func TestWithStoreAcceptsReadWriter(t *testing.T) {
-	s := state.NewStore()
-	var rw progress.ReadWriter = s // compile-time: *state.Store must satisfy ReadWriter
+	s := openTestStore(t)
+	var rw progress.ReadWriter = s // compile-time: *sqlitestore.Store must satisfy ReadWriter
 	o := &Orchestrator{}
 	o.WithStore(rw)
 	if o.store != rw {
@@ -232,7 +243,7 @@ func TestWithStoreAcceptsReadWriter(t *testing.T) {
 // SHA and terminal stage into the store so the idempotency skip check can read
 // it back on the next scan (Bug #23).
 func TestRecordOutcomeWritesToStore(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 
 	// PR must be known to the store before outcome can be recorded.
@@ -263,7 +274,7 @@ func TestRecordOutcomeNilStoreSafe(t *testing.T) {
 // TestRecordOutcomeEmptySHASafe ensures recordOutcome is a no-op when headSHA
 // is empty (retriable / transient outcomes should not be stored as sticky).
 func TestRecordOutcomeEmptySHASafe(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 	s.Report(3, "pkg", "minor", models.StagePending, "")
 
@@ -281,7 +292,7 @@ func TestRecordOutcomeEmptySHASafe(t *testing.T) {
 // StageGaveUp terminal (Part C) — this is the same path as other terminals
 // but exercised explicitly to confirm StageGaveUp is usable as an outcome key.
 func TestRecordOutcomeGaveUp(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 	s.Report(9, "webpack", "major", models.StagePending, "")
 
@@ -320,7 +331,7 @@ func TestBug26FlaggedPathsAreStickyViaRecordOutcome(t *testing.T) {
 
 	for _, stageToRecord := range stages {
 		t.Run(string(stageToRecord), func(t *testing.T) {
-			s := state.NewStore()
+			s := openTestStore(t)
 			o := Orchestrator{store: s}
 			s.Report(prNumber, "some-pkg", "minor", models.StagePending, "")
 
@@ -355,7 +366,7 @@ func TestBug26FlaggedPathsAreStickyViaRecordOutcome(t *testing.T) {
 // intentionally want a retriable outcome (e.g. future explicit retry logic)
 // can still opt out of stickiness.
 func TestBug26EmptySHAStillNoOp(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 	o := Orchestrator{store: s}
 	s.Report(99, "pkg", "patch", models.StagePending, "")
 
@@ -373,7 +384,7 @@ func TestBug26EmptySHAStillNoOp(t *testing.T) {
 // This tests the store state used by the skip check in processPR — the check
 // reads o.store.Get(pr.Number) and skips when HeadSHA matches (Bug #23).
 func TestIdempotencySkipUsesStore(t *testing.T) {
-	s := state.NewStore()
+	s := openTestStore(t)
 
 	// Simulate a prior run: store an outcome for PR 10 at sha-111.
 	s.Report(10, "lodash", "minor", models.StagePending, "")

@@ -112,8 +112,8 @@ var (
 // Report records that PR prNumber has entered stage. The first call for a PR
 // creates its row (and records pkg/bump); later calls update the stage but do
 // NOT overwrite package_name/bump_type — first-write-wins for metadata,
-// matching the in-memory state.Store semantics. Every call appends a
-// stage_events row. Runs in a single transaction.
+// first-write-wins for metadata. Every call appends a stage_events row. Runs
+// in a single transaction.
 func (s *Store) Report(prNumber int, pkg, bump string, stage models.PRStage, detail string) {
 	now := toUnixNano(time.Now())
 	tx, err := s.db.Begin()
@@ -149,8 +149,7 @@ func (s *Store) Report(prNumber int, pkg, bump string, stage models.PRStage, det
 }
 
 // SetImplMeta records the implementation worktree metadata for a PR already
-// known to the store. No-op for an unknown PR (UPDATE touches zero rows),
-// matching state.Store semantics.
+// known to the store. No-op for an unknown PR (UPDATE touches zero rows).
 func (s *Store) SetImplMeta(prNumber int, sessionID, worktreePath, branch string) {
 	now := toUnixNano(time.Now())
 	_, _ = s.db.Exec(`
@@ -162,7 +161,7 @@ func (s *Store) SetImplMeta(prNumber int, sessionID, worktreePath, branch string
 }
 
 // SetReplacementPR records the replacement PR number for a known PR. No-op for
-// an unknown PR, matching state.Store semantics.
+// an unknown PR.
 func (s *Store) SetReplacementPR(prNumber, n int) {
 	now := toUnixNano(time.Now())
 	_, _ = s.db.Exec(`

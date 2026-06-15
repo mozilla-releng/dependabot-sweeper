@@ -1,7 +1,7 @@
 // Package web serves the live dashboard for the persistent service. It reads
-// from a state.Store and a StatusProvider (scan timing) and exposes JSON, an
-// SSE event stream, an agent-log tail, and a Svelte SPA dashboard. It uses
-// only the standard library — no web framework.
+// from a progress.Reader / progress.Notifier and a StatusProvider (scan timing)
+// and exposes JSON, an SSE event stream, an agent-log tail, and a Svelte SPA
+// dashboard. It uses only the standard library — no web framework.
 package web
 
 import (

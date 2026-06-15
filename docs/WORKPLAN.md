@@ -103,7 +103,14 @@ repo). Tick the phase when its items below are done.
   6. [ ] Agent curates its own history (Q13) — **deferred (agentic; pairs with the cluster).**
   7. [x] Sweeper-PR naming + DB-record exclusion + pairing attribute (Q14). **PR #6.**
   8. [ ] Worker-authored justification, private-through-review, posted on approval (Q15) — **deferred (agentic).**
-- [ ] **Phase 4 — UI items.** PR→GitHub link; `#183 / #204` pairing display.
+- [ ] **Phase 4 — UI items — DEFERRED (needs a browser-capable session).** PR→GitHub link;
+  `#183 / #204` pairing display. Not done autonomously: this is Svelte UI work and the project rule
+  is to browser-smoke-test UI changes — not possible headlessly here, so shipping unverified
+  rendering would violate "verify before claiming." The pairing half also needs Q14's reverse link
+  (PR #6) merged first. **Plumbing sketch:** add `URL` to `PRProgress` (persist via store + schema),
+  set it from `pr.URL` in the orchestrator, expose it in the web API (`api.ts` type), render the PR
+  number in `PrDrawer.svelte` as a link; the pairing reads `replacement_pr` (forward) + `created_prs`
+  (reverse, from Q14).
 - [~] **Phase 5 — Docs.** `docs/PRINCIPLES.md` **created** (resolves the dangling reference that
   ALGORITHM.md/memory pointed at; North Star + non-negotiables at current-state UX level, mechanism
   left to ALGORITHM.md). The **two-PR-type lifecycle section is deferred** to land with Q14's merge

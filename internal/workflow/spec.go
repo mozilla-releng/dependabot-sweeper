@@ -191,7 +191,7 @@ func Spec() Graph {
 				Label:   "Gave up",
 				Phase:   "Done+Flagged",
 				Summary: "Gave up trying to fix CI — the same failures persisted beyond the iteration or time cap.",
-				Detail:  "NOTE: currently the CI-fix-loop give-up path routes to flagged_human instead (Bug #24). This node represents the intended behaviour once Bug #24 is fixed.",
+				Detail:  "Reached when the CI-fix loop exhausts its iteration/time cap, trips the no-progress guard, or post-squash CI fails to settle. A concise one-line reason is posted and the outcome is recorded sticky at the head SHA, so the next scan skips the PR until dependabot pushes a new commit.",
 				Where:   "implementation.go:decideCIFixLoop → ciFixGiveUp",
 			},
 			{

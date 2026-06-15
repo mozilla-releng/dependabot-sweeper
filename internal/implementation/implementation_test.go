@@ -97,6 +97,25 @@ func TestBuildBranchName(t *testing.T) {
 	}
 }
 
+func TestSweeperPRTitle(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"build(deps): bump query-string from 7.1.1 to 9.3.1", "fix(deps): bump query-string from 7.1.1 to 9.3.1"},
+		{"build(deps-dev): bump eslint from 8 to 9", "fix(deps-dev): bump eslint from 8 to 9"},
+		{"build(deps): bump the node-deps group with 14 updates", "fix(deps): bump the node-deps group with 14 updates"},
+		{"Bump lodash from 4.17.21 to 5.0.0", "fix(deps): Bump lodash from 4.17.21 to 5.0.0"}, // no prefix → prepend
+		{"chore: update X", "fix: update X"},                     // any type → fix
+		{"fix(deps): already a fix", "fix(deps): already a fix"}, // idempotent-ish
+		{"no colon here", "fix(deps): no colon here"},            // not conventional
+	}
+	for _, tt := range tests {
+		if got := SweeperPRTitle(tt.in); got != tt.want {
+			t.Errorf("SweeperPRTitle(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
 func TestParseDiffStat(t *testing.T) {
 	tests := []struct {
 		name     string

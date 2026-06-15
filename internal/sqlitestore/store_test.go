@@ -267,6 +267,40 @@ func TestReapRemovesClosedPRs(t *testing.T) {
 	}
 }
 
+// TestCreatedPRsSurviveReap is the cost-safety regression (Q14 / review C1): the
+// reap-exempt created_prs record must persist across a Reap that prunes
+// pr_progress. Otherwise the tool would re-ingest its own replacement PR as a
+// fresh dependabot PR and re-enter the expensive agentic step.
+func TestCreatedPRsSurviveReap(t *testing.T) {
+	s := openWriter(t)
+	// PR 100 is the dependabot PR; PR 204 is the sweeper PR we created for it.
+	s.Report(100, "lodash", "major", models.StagePending, "")
+	s.RecordCreatedPR(204, 100)
+
+	// Reap with an open set that excludes both — pr_progress for 100 is pruned,
+	// but the created_prs record must remain.
+	s.Reap([]int{999})
+
+	if _, ok := s.Get(100); ok {
+		t.Error("expected PR 100's pr_progress row to be reaped (sanity: Reap ran)")
+	}
+	created := s.CreatedPRs()
+	if origin, ok := created[204]; !ok || origin != 100 {
+		t.Errorf("created_prs lost after Reap: got %v, want {204:100}", created)
+	}
+}
+
+func TestRecordCreatedPRRoundtrip(t *testing.T) {
+	s := openWriter(t)
+	s.RecordCreatedPR(204, 100)
+	s.RecordCreatedPR(205, 101)
+	s.RecordCreatedPR(204, 100) // idempotent re-record
+	created := s.CreatedPRs()
+	if len(created) != 2 || created[204] != 100 || created[205] != 101 {
+		t.Errorf("CreatedPRs = %v, want {204:100, 205:101}", created)
+	}
+}
+
 // Reap with an empty/nil open set must NOT wipe the table: an empty set can be
 // a spurious API result, and destroying the idempotency history would force
 // re-processing of every PR. Rows are retained and self-heal on the next reap

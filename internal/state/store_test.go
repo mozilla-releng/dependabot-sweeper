@@ -231,6 +231,23 @@ func TestReportDoesNotBlockOnFullSubscriber(t *testing.T) {
 	}
 }
 
+// TestCreatedPRsSurviveReap mirrors the sqlitestore test (Q14 / C1): the
+// in-memory store's Reap must not drop created-PR records.
+func TestCreatedPRsSurviveReap(t *testing.T) {
+	s := NewStore()
+	s.Report(100, "lodash", "major", models.StagePending, "")
+	s.RecordCreatedPR(204, 100)
+
+	s.Reap([]int{999}) // prune everything open (excludes 100)
+
+	if _, ok := s.Get(100); ok {
+		t.Error("expected PR 100 to be reaped")
+	}
+	if created := s.CreatedPRs(); created[204] != 100 {
+		t.Errorf("created_prs lost after Reap: got %v, want {204:100}", created)
+	}
+}
+
 func TestReapRemovesClosedPRs(t *testing.T) {
 	s := NewStore()
 	for _, n := range []int{1, 2, 3} {

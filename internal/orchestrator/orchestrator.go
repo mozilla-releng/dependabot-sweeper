@@ -153,6 +153,39 @@ func (o *Orchestrator) recordOutcome(prNumber int, headSHA string, outcome model
 	}
 }
 
+// recordCreatedPR is the nil-safe shim for recording a sweeper PR we opened, so
+// it is permanently excluded from future scans (Q14).
+func (o *Orchestrator) recordCreatedPR(createdPR, originPR int) {
+	if o.store != nil {
+		o.store.RecordCreatedPR(createdPR, originPR)
+	}
+}
+
+// excludeOwnPRs drops PRs the tool itself created (Q14 / review C1). The author
+// filter is the primary in-scope gate, but on the test bed the fix-PR author is
+// also an accepted author — so without this a replacement PR could be
+// re-ingested and re-processed as a fresh dependabot PR, a runaway agentic-cost
+// incident. The record lives in a reap-exempt table, so it survives the per-cycle
+// Reap. No-op when the store is nil or nothing has been created yet.
+func (o *Orchestrator) excludeOwnPRs(prs []models.DependabotPR) []models.DependabotPR {
+	if o.store == nil {
+		return prs
+	}
+	created := o.store.CreatedPRs()
+	if len(created) == 0 {
+		return prs
+	}
+	out := make([]models.DependabotPR, 0, len(prs))
+	for _, pr := range prs {
+		if _, ours := created[pr.Number]; ours {
+			slog.Info("Skipping our own replacement PR (reap-exempt exclusion)", "pr", pr.Number)
+			continue
+		}
+		out = append(out, pr)
+	}
+	return out
+}
+
 // Run is the main loop: fetch PRs, process each serially.
 func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 	slog.Info("Fetching dependabot PRs", "repo", o.repo)
@@ -162,6 +195,10 @@ func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 		return nil
 	}
 	slog.Info("Found dependabot PRs", "count", len(allPRs))
+
+	// Drop any PR the tool itself created — a reap-exempt cost-safety gate so our
+	// own replacement PRs are never re-ingested as fresh dependabot PRs (Q14).
+	allPRs = o.excludeOwnPRs(allPRs)
 
 	// `--pr N` narrows which PRs we PROCESS, but the staleness check
 	// still needs to see every PR — otherwise a PR that's superseded by
@@ -699,6 +736,7 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 			slog.Info("replacement PR already exists — skipping pipeline", "pr", pr.Number, "replacement", existingN)
 			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, fmt.Sprintf("replacement PR #%d already exists", existingN))
 			o.reportReplacement(pr.Number, existingN)
+			o.recordCreatedPR(existingN, pr.Number) // ensure our own PR is excluded even if found pre-existing (Q14)
 			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
 			return models.ReviewResult{
 				PRNumber:            pr.Number,
@@ -736,7 +774,10 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 			slog.Info("Implementation agent created PR, finalising",
 				"pr", pr.Number, "replacement", replacementNumber)
 
-			if err := o.github.UpdatePRTitle(ctx, replacementNumber, pr.Title); err != nil {
+			// Name the sweeper PR distinctly: the dependabot title with the
+			// conventional-commit type swapped to `fix` (Q14), not a verbatim copy
+			// of the dependabot title — which made the two indistinguishable.
+			if err := o.github.UpdatePRTitle(ctx, replacementNumber, implementation.SweeperPRTitle(pr.Title)); err != nil {
 				slog.Warn("failed to update replacement PR title", "pr", replacementNumber, "error", err)
 			}
 			if err := o.github.MarkPRReadyForReview(ctx, replacementNumber); err != nil {
@@ -750,6 +791,7 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 
 			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, result.Detail)
 			o.reportReplacement(pr.Number, replacementNumber)
+			o.recordCreatedPR(replacementNumber, pr.Number) // exclude our own PR from future scans (Q14)
 			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
 			return models.ReviewResult{
 				PRNumber:            pr.Number,

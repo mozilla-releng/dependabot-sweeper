@@ -32,6 +32,10 @@ type Store struct {
 	mu          sync.RWMutex
 	prs         map[int]*models.PRProgress
 	subscribers map[chan struct{}]struct{}
+	// created maps each sweeper "fix" PR the tool opened to its origin dependabot
+	// PR. It is deliberately NOT touched by Reap — these records are permanent so
+	// the tool never re-ingests its own PR (Q14 / review C1).
+	created map[int]int
 }
 
 // NewStore returns an empty, ready-to-use Store.
@@ -39,6 +43,7 @@ func NewStore() *Store {
 	return &Store{
 		prs:         make(map[int]*models.PRProgress),
 		subscribers: make(map[chan struct{}]struct{}),
+		created:     make(map[int]int),
 	}
 }
 
@@ -133,6 +138,29 @@ func (s *Store) SetOutcome(prNumber int, headSHA, outcome string) {
 	}
 	s.mu.Unlock()
 	s.broadcast()
+}
+
+// RecordCreatedPR records that the tool opened sweeper PR createdPR for origin
+// dependabot PR originPR. Stored separately from prs so it survives Reap (Q14).
+func (s *Store) RecordCreatedPR(createdPR, originPR int) {
+	s.mu.Lock()
+	if s.created == nil {
+		s.created = make(map[int]int)
+	}
+	s.created[createdPR] = originPR
+	s.mu.Unlock()
+	s.broadcast()
+}
+
+// CreatedPRs returns a copy of the created-PR → origin-PR map.
+func (s *Store) CreatedPRs() map[int]int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[int]int, len(s.created))
+	for k, v := range s.created {
+		out[k] = v
+	}
+	return out
 }
 
 // SetAnalysis records the analyser verdict for a known PR. No-op for an unknown PR.

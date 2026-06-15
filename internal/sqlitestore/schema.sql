@@ -56,6 +56,17 @@ CREATE TABLE IF NOT EXISTS ci_checks (
 );
 CREATE INDEX IF NOT EXISTS idx_ci_checks_pr ON ci_checks(pr_number, id);
 
+-- PRs the tool itself created (sweeper "fix" PRs), keyed by the created PR
+-- number → its origin dependabot PR. PERMANENT and reap-exempt: Store.Reap only
+-- prunes pr_progress, never this table, so the tool never re-ingests its own PR
+-- even after that PR's pr_progress row is reaped (Q14 / review C1). No FK to
+-- pr_progress so it outlives that row.
+CREATE TABLE IF NOT EXISTS created_prs (
+    pr_number  INTEGER PRIMARY KEY,             -- the sweeper "fix" PR number
+    origin_pr  INTEGER NOT NULL DEFAULT 0,      -- the originating dependabot PR
+    created_at INTEGER NOT NULL DEFAULT 0       -- unix nanoseconds, UTC
+);
+
 -- Single-row status written by the worker process and read by the web process.
 CREATE TABLE IF NOT EXISTS scan_status (
     id        INTEGER PRIMARY KEY CHECK (id = 1),  -- enforces single row

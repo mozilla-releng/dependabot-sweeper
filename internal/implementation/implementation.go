@@ -37,6 +37,27 @@ func BuildBranchName(packageName, newVersion string) string {
 	return fmt.Sprintf("auto/fix/%s-%s", name, version)
 }
 
+// conventionalPrefixRe matches a conventional-commit prefix — a type, an
+// optional (scope), then ": ". Group 1 is the type, group 2 the optional scope
+// (including its parentheses), and the whole match (group 0) is the prefix.
+var conventionalPrefixRe = regexp.MustCompile(`^([a-zA-Z]+)(\([^)]*\))?: `)
+
+// SweeperPRTitle derives the replacement PR's title from the dependabot title by
+// swapping the conventional-commit type to `fix`, preserving the scope and
+// description (`build(deps): bump X…` → `fix(deps): bump X…`). When the title has
+// no recognisable conventional prefix (e.g. a bare `Bump X from A to B`), it
+// prepends `fix(deps): `. This makes a sweeper PR visibly and structurally
+// distinct from a dependabot PR (T12/Q14) — it replaces the previous verbatim
+// copy of the dependabot title, which made the two indistinguishable. Pure.
+func SweeperPRTitle(dependabotTitle string) string {
+	if m := conventionalPrefixRe.FindStringSubmatch(dependabotTitle); m != nil {
+		scope := m[2] // includes the parentheses, or "" when there's no scope
+		rest := dependabotTitle[len(m[0]):]
+		return fmt.Sprintf("fix%s: %s", scope, rest)
+	}
+	return "fix(deps): " + dependabotTitle
+}
+
 // gitCredentialHelper is a git credential.helper that supplies the GitHub token
 // from the GH_TOKEN environment variable. Using it (instead of embedding the
 // token in the clone URL) keeps the token out of the remote URL, .git/config,

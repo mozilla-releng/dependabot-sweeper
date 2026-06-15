@@ -14,6 +14,73 @@ func TestReportStageNilSafe(t *testing.T) {
 	o.reportStage(1, "pkg", "minor", models.StagePending, "")
 }
 
+// TestPrepopulateNilStoreSafe ensures prepopulate is a no-op (no panic) when no
+// store is configured (one-shot `review` mode).
+func TestPrepopulateNilStoreSafe(t *testing.T) {
+	var o Orchestrator // store is nil
+	o.prepopulate([]models.DependabotPR{{Number: 1, PackageName: "pkg", BumpType: models.BumpMajor}})
+}
+
+// TestPrepopulateStampsNewPRsOnce is the T6a regression test: prepopulate stamps
+// `pending` only for PRs the store has not seen, and never re-stamps an already
+// tracked (often terminal) PR — so a no-op cycle records no new transition.
+func TestPrepopulateStampsNewPRsOnce(t *testing.T) {
+	s := state.NewStore()
+	o := Orchestrator{store: s}
+
+	prs := []models.DependabotPR{
+		{Number: 1, PackageName: "react", BumpType: models.BumpMajor},
+		{Number: 2, PackageName: "lodash", BumpType: models.BumpMinor},
+	}
+
+	// First cycle: both PRs are new → each created at `pending` with one event.
+	o.prepopulate(prs)
+	for _, n := range []int{1, 2} {
+		got, ok := s.Get(n)
+		if !ok {
+			t.Fatalf("PR %d not created by prepopulate", n)
+		}
+		if got.Stage != models.StagePending {
+			t.Errorf("PR %d stage = %q, want pending", n, got.Stage)
+		}
+		if len(got.History) != 1 {
+			t.Errorf("PR %d history = %d events, want 1", n, len(got.History))
+		}
+	}
+
+	// PR 1 reaches a terminal outcome (as the real pipeline would record it).
+	o.reportStage(1, "react", "major", models.StageFinalized, "done")
+	o.recordOutcome(1, "sha-react", models.StageFinalized)
+	histAfterFinalize := func(n int) int {
+		got, _ := s.Get(n)
+		return len(got.History)
+	}
+	pr1Hist := histAfterFinalize(1)
+
+	// Second cycle: PR 1 and PR 2 are already tracked; PR 3 is new. A no-op cycle
+	// must NOT grow PR 1's or PR 2's history, and must NOT reset PR 1 off its
+	// terminal stage.
+	prs = append(prs, models.DependabotPR{Number: 3, PackageName: "webpack", BumpType: models.BumpMajor})
+	o.prepopulate(prs)
+
+	if got, _ := s.Get(1); got.Stage != models.StageFinalized {
+		t.Errorf("PR 1 stage = %q after re-prepopulate, want finalized (no re-stamp)", got.Stage)
+	}
+	if h := histAfterFinalize(1); h != pr1Hist {
+		t.Errorf("PR 1 history grew from %d to %d on a no-op cycle (re-stamp leak)", pr1Hist, h)
+	}
+	if h := histAfterFinalize(2); h != 1 {
+		t.Errorf("PR 2 history = %d, want 1 (must not be re-stamped)", h)
+	}
+	got3, ok := s.Get(3)
+	if !ok {
+		t.Fatal("PR 3 (new) not created by the second prepopulate")
+	}
+	if got3.Stage != models.StagePending || len(got3.History) != 1 {
+		t.Errorf("PR 3 = {stage:%q history:%d}, want {pending 1}", got3.Stage, len(got3.History))
+	}
+}
+
 func TestReportStageWritesToStore(t *testing.T) {
 	s := state.NewStore()
 	o := Orchestrator{store: s}

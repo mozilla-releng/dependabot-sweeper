@@ -96,6 +96,25 @@ func (o *Orchestrator) reapClosed(open []models.DependabotPR) {
 	o.store.Reap(nums)
 }
 
+// prepopulate stamps `pending` (the graph entry) for every PR the store has not
+// seen before, so its row exists for the per-PR metadata writes (SetVersions /
+// SetCI no-op on an unknown row). PRs already tracked are left untouched: a
+// no-op cycle must record no transition (T6a) — re-stamping an already-tracked
+// (often terminal) PR every cycle was the reporting-noise bug. The dashboard
+// reads each PR's last real stage straight from the row. No-op when the store
+// is nil (one-shot `review` mode).
+func (o *Orchestrator) prepopulate(prs []models.DependabotPR) {
+	if o.store == nil {
+		return
+	}
+	for _, pr := range prs {
+		if _, ok := o.store.Get(pr.Number); ok {
+			continue
+		}
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StagePending, "")
+	}
+}
+
 // reportReplacement is the nil-safe shim for recording a replacement PR number.
 func (o *Orchestrator) reportReplacement(prNumber, replacementN int) {
 	if o.store != nil {
@@ -175,12 +194,10 @@ func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 	// the dashboard never briefly shows a stale PR being re-added.
 	o.reapClosed(allPRs)
 
-	// Pre-populate the dashboard immediately so all PRs are visible as soon as
-	// the fetch phase completes, rather than appearing one-by-one as goroutines
-	// start. Individual goroutines will overwrite these with finer-grained stages.
-	for _, pr := range toProcess {
-		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StagePending, "")
-	}
+	// Pre-populate the dashboard so all PRs are visible as soon as the fetch
+	// phase completes, rather than appearing one-by-one as goroutines start.
+	// Individual goroutines overwrite these with finer-grained stages.
+	o.prepopulate(toProcess)
 
 	results := make([]models.ReviewResult, len(toProcess))
 	processed := make([]bool, len(toProcess))
@@ -224,7 +241,8 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		"ci", pr.CI.State,
 		"passed", pr.CI.Passed,
 		"total", pr.CI.Total)
-	o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StagePending, "")
+	// No `pending` re-stamp here: prepopulate() already created the row on first
+	// sight, and re-stamping it every cycle was the reporting-noise bug (T6a).
 	// Populate version metadata and initial CI snapshot immediately so the
 	// dashboard can show old→new and CI state even for PRs that are skipped
 	// early (patch, stale, not-settled, already-processed) without waiting
@@ -346,15 +364,9 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		}
 		if alreadyProcessed {
 			slog.Info("PR already processed at this head SHA — skipping", "pr", pr.Number)
-			// Show the real terminal outcome in the dashboard rather than the
-			// generic "skipped" label, so the UI stays meaningful after the first scan.
-			displayStage := models.StageSkipped
-			if o.store != nil {
-				if stored, ok := o.store.Get(pr.Number); ok && stored.Outcome != "" {
-					displayStage = models.PRStage(stored.Outcome)
-				}
-			}
-			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), displayStage, "already processed at this head SHA")
+			// T6a: a no-op cycle records NO transition. The row's stored stage and
+			// outcome already reflect the terminal result, which the dashboard reads
+			// directly — re-stamping it every cycle was the reporting-noise bug.
 			return models.ReviewResult{
 				PRNumber:    pr.Number,
 				PackageName: pr.PackageName,

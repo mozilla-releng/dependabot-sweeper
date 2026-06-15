@@ -41,3 +41,20 @@ Format per entry:
   (3.0/3.2/3.2b/3.3/3.6/3.8) is then tackled as a coherent unit (or left with a written plan if I
   run out of time), rather than as risky partial PRs. **Nothing is blocked**; the order within
   Phase 3 is the only deviation, and these items don't rest on 3.2.
+
+- **[Phase 3.2 cluster — needs a verified environment; your call on how to proceed]** The
+  analyser-removal cluster (3.0/3.2/3.2b/3.3/3.6/3.8) was **left as a written plan** (see
+  `docs/WORKPLAN.md` → "Phase 3.2 cluster — implementation plan (DEFERRED)"), not shipped.
+  **Why it's a decision for you:** it is fundamentally an *agentic-behaviour* change (prompts,
+  analyse-then-decide flow) that can't be exercised in this environment (no `ANTHROPIC_API_KEY` /
+  `claude` CLI), and the project rule is "never imply success you haven't observed." It is also one
+  tightly-coupled unit (it defines + implements the new state machine), so landing it piecemeal
+  would leave `spec.go` and the code disagreeing — worse than today.
+  **Options:** (a) I (or a next session) implement the whole cluster behind the Q10-rollback flag,
+  then you run one e2e cycle against `petemoore/taskcluster` with a real key to verify each outcome
+  before marking ready. (b) You review the written plan first and adjust the target before any code.
+  (c) Pair on it interactively so the agentic behaviour can be observed as it's built.
+  **Recommendation:** (a) — the plan is detailed and the groundwork (TipSHA, required-checks,
+  created_prs) is already in the draft PRs; the only true gap is live verification, which needs your
+  environment. **Blocked on:** a verifiable environment / your preference. **What I did instead:**
+  banked every independent, verifiable Phase-3 item (Q5/Q6/Q7/Q12/Q14) as draft PRs.

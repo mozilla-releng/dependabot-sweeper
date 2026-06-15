@@ -89,18 +89,20 @@ repo). Tick the phase when its items below are done.
   comment marker) against it via `terminalSHA()` — review N4/MAJOR-1 ✓; all other `recordOutcome`
   calls left on `pr.HeadSHA`). **PR #2 (draft).** ⚠️ Phase-0 surfaced a `-X theirs` rebase-pollution
   component this narrow fix doesn't fully clean — see `docs/questions.md`.
-- [ ] **Phase 3 — Core rework** (large, interrelated; sequence as its own PRs in this order):
-  0. Reconcile `spec.go` to the post-Q10 state machine FIRST (review C2), so the transition guard
-     is authored against the final graph.
-  1. Required-checks gating (Q7) — the new CI bar; empty required set → fall back to all-checks (M2).
-  2. One-agent step; remove the separate analyser (Q10) — the structural change.
-  2b. Q8 transition guard (now that spec.go is reconciled) — cost-safety-critical.
-  3. No-attribution + silent-draft + approve-only-when-green (Q1/Q2/Q3/Q4).
-  4. Skip-by-`min-bump` config + `unknown`→skip (Q5); group↔individual supersession (Q6).
-  5. No-progress progress-metric, K=8 (Q12).
-  6. Agent curates its own history (Q13).
-  7. Sweeper-PR naming + DB-record exclusion + pairing attribute (Q14).
-  8. Worker-authored justification, private-through-review, posted on approval (Q15).
+- [~] **Phase 3 — Core rework** (large, interrelated). _Within-phase order deviated to bank
+  independent, verifiable wins first; the analyser-removal cluster (0/2/2b/3/6/8) is agentic and
+  can't be exercised in this environment — see `docs/questions.md` and the **Phase 3.2 plan** below.
+  PR numbers are draft PRs on this repo._
+  0. [ ] Reconcile `spec.go` to the post-Q10 state machine FIRST (review C2) — **deferred (cluster)**.
+  1. [x] Required-checks gating (Q7) — empty required set → all-checks (M2). **PR #5.**
+  2. [ ] One-agent step; remove the separate analyser (Q10) — **deferred (cluster; agentic, see plan)**.
+  2b. [ ] Q8 transition guard (after spec.go reconciled) — **deferred (cluster)**.
+  3. [ ] No-attribution + silent-draft + approve-only-when-green (Q1/Q2/Q3/Q4) — **deferred (cluster)**.
+  4. [x] Skip-by-`min-bump` config + `unknown`→skip (Q5); group↔individual supersession (Q6). **PR #4.**
+  5. [x] No-progress progress-metric, K=8 (Q12). **PR #3.**
+  6. [ ] Agent curates its own history (Q13) — **deferred (agentic; pairs with the cluster).**
+  7. [x] Sweeper-PR naming + DB-record exclusion + pairing attribute (Q14). **PR #6.**
+  8. [ ] Worker-authored justification, private-through-review, posted on approval (Q15) — **deferred (agentic).**
 - [ ] **Phase 4 — UI items.** PR→GitHub link; `#183 / #204` pairing display.
 - [ ] **Phase 5 — Docs.** Add the two-PR-type lifecycle section; fold the North Star into
   `docs/PRINCIPLES.md`. (`spec.go` reconciliation moved to Phase 3.0 per review C2.)
@@ -124,6 +126,60 @@ supporting features); Phases 4–5 are polish and durable documentation.
 
 ---
 
+## Phase 3.2 cluster — implementation plan (DEFERRED)
+
+The analyser-removal cluster — **3.0 (spec.go reconcile), 3.2 (single agent), 3.2b (Q8 guard),
+3.3 (no-attribution/silent-draft/approve-only-green), 3.6 (Q13 curate), 3.8 (Q15 justification)** —
+was deliberately **not** shipped autonomously. Two reasons:
+
+1. **It can't be verified here.** These items are fundamentally about *agent behaviour* (prompts,
+   multi-turn reasoning, the analyse-then-decide flow). Exercising them needs a real
+   `ANTHROPIC_API_KEY` + the `claude` CLI against the test bed. Per the project rule "never imply
+   success you haven't observed," shipping an unexercised giant agentic refactor as "done" would be
+   dishonest. CI (build/test) passing is necessary but nowhere near sufficient here.
+2. **It is one tightly-coupled unit.** These steps collectively *define and implement* the new state
+   machine; landing them piecemeal risks an intermediate state where `spec.go` (the map) and the
+   code (the territory) disagree — strictly worse than today's drift. They should land together,
+   behind the optional Q10-rollback flag, then be e2e-verified.
+
+Phases 2/3 already laid the groundwork the cluster reuses: the **post-rebase tip SHA**
+(`Pipeline.bumpTipSHA`, `RunResult.TipSHA`) is the canonical base the Q13 curate and the M1
+silent-draft outcome record against; **required-checks gating** is the green bar; the
+**reap-exempt `created_prs`** record is the cost-safety backstop.
+
+Recommended sequence when a verified environment is available:
+
+- **A. Reconcile `spec.go` (3.0).** Redraw to the single-agent flow: one agentic node that
+  analyses + decides, ending in `recommend` (comment), `finalized` (replacement PR),
+  `flagged_human` (concise reason), or `gave_up`/silent-draft. Keep `spec_test` green (every
+  `PRStage` a node). Reconcile the `error`-vs-`flagged` stage/outcome mismatch noted in Phase 1.
+- **B. Single agentic step (3.2).** Remove/repurpose `internal/analyser`; the orchestrator stops
+  calling `Analyse`. Every engaged PR goes to one agent with a live checkout that does its own
+  upstream + codebase analysis, then routes to one of the outcomes above. Rewrite the
+  implementation brief to own the analyse-and-decide responsibility (apply [[feedback-prompt-why]]).
+  Keep the reviewer on the fix path. Consider keeping the analyser path behind a flag for one
+  release (Q10 rollback).
+- **C. Q8 transition guard (3.2b).** A `Report`-layer guard validating stage→stage transitions,
+  collapsing decision **and** back edges (N2); reject/loud-log illegal ones. Test a resume-loop
+  round-trip. Cost-safety-critical (stops a processed PR re-entering the agent).
+- **D. No-attribution + silent-draft + approve-only-green (3.3).** Drop base-suppression as a
+  success criterion (genuine required-green is the bar). Silent failed draft must record a sticky
+  `gave_up` at the **post-rebase tip** (Phase 2's `TipSHA` — the plumbing is already in place) and
+  open the draft only after a non-empty SHA (M1/N3/N4). `recommend` is re-gated by a fresh
+  mechanical required-CI read in the orchestrator, never the agent's self-report (Q4/C3).
+- **E. Q13 curate (3.6).** Replace the orchestrator's blind `squashBranch` with an agent curate
+  step that soft-resets to `bumpTipSHA` and re-commits the work as one or more logical commits.
+- **F. Q15 justification (3.8).** Implementer authors a structured justification, held **private**
+  through the implementer↔reviewer loop, posted to the PR body on final approval (PR flips
+  draft→ready). Reviewer reviews it too and challenges over-long. Replaces the dead
+  `ReviewVerdict.Summary`.
+
+**Before marking any cluster PR ready:** run an e2e cycle against `petemoore/taskcluster` with a
+real key, watching that no PR re-enters the agentic pipeline in a loop (the cost-safety invariant),
+and confirm each outcome (recommend / replacement / flag / silent-draft) on a real PR.
+
+---
+
 ## Confirmed bugs
 
 - [x] **T9 — Squash bundles unrelated `main` changes into the "fix" commit.** **Done — PR #2
@@ -142,11 +198,10 @@ supporting features); Phases 4–5 are polish and durable documentation.
   **both decision AND back edges** (review N2). Cost-safety-critical.
 - [x] **T4 — Stale `spec.go` comment** on the `gave_up` node. **Done — PR #1.** Comment now
   describes the correct current behaviour (records `gave_up` sticky at the head SHA).
-- [ ] **T12 — Re-ingestion risk (Q14 → DECIDED):** exclude the tool's own PRs via a DB record of
-  what it created (never a branch-name/title heuristic — branch names are attacker-spoofable).
-  ⚠️ **Must be a reap-exempt table (review C1)** — NOT a `pr_progress` column, which `Store.Reap`
-  wipes each cycle for non-accepted-author PRs (our own replacement PRs in prod). In-scope stays
-  author-filter-only. Cost-safety-critical (re-admitted own-PR = runaway agentic step).
+- [x] **T12 — Re-ingestion risk (Q14 → DECIDED):** **PR #6.** Own PRs recorded in a reap-exempt
+  `created_prs` table (created→origin) and excluded from scans each cycle; `Store.Reap` only prunes
+  `pr_progress` (review C1, regression-tested on both stores). Title is now `SweeperPRTitle` (type
+  swapped to `fix`), not a verbatim dependabot-title copy. In-scope stays author-filter-only.
 - [ ] **Dead/hollow fields:** `ReviewVerdict.Summary` is computed "for the PR body" but never
   used (T13); `PRProgress.BudgetSpent` is always 0. Wire up or remove. (also in backlog memory)
 
@@ -189,13 +244,10 @@ The centrepiece is the fix-first rework; the rest support it.
   finalize: soft-reset to the post-rebase bump tip (same SHA as the T9 fix) and re-commit its work
   as one or more intentional, well-messaged logical commits. Replaces the orchestrator's blind
   `squashBranch`; dependabot's bump commit(s) stay preserved (Q11). Resolves T11; pairs with Q15.
-- [ ] **Sweeper-PR naming + tracking (Q14 → DECIDED).** (1) Title = dependabot title with type
-  swapped `build`→`fix`; prepend `fix(deps): ` if no parseable prefix (replaces verbatim
-  `pr.Title` copy). (2) Record every PR the tool creates in the DB and permanently exclude those
-  from scans — **not** a branch-name/title heuristic (branch names are attacker-spoofable);
-  in-scope stays author-filter-only. (3) Sweeper PR is an **attribute on the dependabot PR's row**
-  (add reverse link), not a first-class entity. (4) Add a doc section modelling the two-PR-type
-  lifecycle. (T12, Q14)
+- [x] **Sweeper-PR naming + tracking (Q14 → DECIDED).** **PR #6.** (1) `SweeperPRTitle` swaps the
+  conventional type to `fix` / prepends `fix(deps): ` ✓. (2) reap-exempt `created_prs` table +
+  scan exclusion ✓. (3) created→origin reverse link stored (feeds the Phase-4 pairing UI) ✓.
+  (4) doc section — **Phase 5 (pending).** (T12, Q14)
 
 ---
 
@@ -230,22 +282,20 @@ The centrepiece is the fix-first rework; the rest support it.
 
 ## Smaller / independent items
 
-- [ ] **Gate on required checks only (Q7 → DECIDED).** Read the repo's required-status-checks set;
-  treat only those as blocking ("CI passing" ≡ "required checks passing"). Resolves T5. **Empty
-  required set → fall back to all-checks** (review M2 — else we'd recommend-merge an all-red PR).
-  Needs branch-protection read scope on the token; cache the required set per-base-branch per cycle.
-- [ ] **No-progress guard → progress metric (Q12 → DECIDED → a, K=8, monotonic floor).** Track the
-  lowest failing-*required*-check count seen so far; give up when that floor hasn't improved over
-  the last **8** attempts (configurable). Floor (not sliding window) so up-down oscillation can't
-  game it (review M3). Don't inherit the existing `prevBlocking` off-by-one. Subsumes stationary +
-  thrashing. `MaxImplIterations` (30) stays the ceiling. (Resolves T10.)
-- [ ] **Skip-by-bump-type per repo (Q5 → DECIDED → a).** Per-repo `min-bump-to-engage` config
-  (default `major`); skip anything below it. Replace the current hardcoded "skip only patch."
-  Record skipped-out-of-policy bumps on the dashboard with a note.
-- [ ] **Grouped-PR supersession (Q6 → DECIDED → a).** Decompose grouped PRs into member
-  `(package, version)` pairs and run semver comparison against individual PRs. A group supersedes
-  (closes) an individual when it covers that package at ≥ version; an individual never closes a
-  whole group. Kills duplicate work / duplicate replacement PRs.
+- [x] **Gate on required checks only (Q7 → DECIDED).** **PR #5.** `AcceptableGiven` gains a
+  `required` set; `Client.RequiredChecks` reads branch protection (cached per base branch per
+  cycle) and degrades safely to all-checks on 404/403/error. Empty required set → all-checks (M2).
+  Resolves T5. ⚠️ needs an admin-scoped token to take effect (else stays all-checks).
+- [x] **No-progress guard → progress metric (Q12 → DECIDED → a, K=8, monotonic floor).** **PR #3.**
+  `decideNoProgress` now tracks the lowest blocking-check count (monotonic floor) and gives up when
+  it hasn't improved over `MaxNoProgressIterations` (default 8, now a CLI flag) settled attempts.
+  Floor beats oscillation; no off-by-one. Subsumes stationary + thrashing. (Resolves T10.)
+- [x] **Skip-by-bump-type per repo (Q5 → DECIDED → a).** **PR #4.** `--min-bump-to-engage`
+  (default `major`); `models.BumpRank` skips anything below it, incl. `unknown` (closes the Phase-0
+  finding). Recorded on the dashboard (`ActionSkippedPolicy`).
+- [x] **Grouped-PR supersession (Q6 → DECIDED → a).** **PR #4.** `FindSupersedingGroup` closes an
+  individual when a group covers its package at ≥ its version; a group is never closed by an
+  individual (asymmetric). Kills duplicate work / duplicate replacement PRs.
 - ~~**Analyser access model (Q9)**~~ — MOOT: Q10 removes the separate analyser; the single agent
   has a live checkout (resolves T7).
 

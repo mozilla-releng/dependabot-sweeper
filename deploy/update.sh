@@ -63,19 +63,28 @@ else
     echo "  ✓ Image pushed."
 fi
 
+echo "▶ Updating sweeper-image metadata on $VM_NAME..."
+if [ "$DRY_RUN" = true ]; then
+    echo "  [dry-run] gcloud compute instances add-metadata $VM_NAME --zone=$ZONE --metadata=sweeper-image=$IMAGE"
+else
+    gcloud compute instances add-metadata "$VM_NAME" \
+        --zone="$ZONE" \
+        --metadata="sweeper-image=${IMAGE}"
+    echo "  ✓ Metadata updated (future VM reboots will use this image)."
+fi
+
 echo "▶ Restarting services on $VM_NAME (zone $ZONE)..."
 RESTART_CMD="
-    # Re-authenticate Docker with Artifact Registry
     gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin ${IMAGE%%/*} &&
     sudo docker pull ${IMAGE} &&
-    # Read deployment vars from instance metadata
     REPO=\$(curl -sf -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/sweeper-repo) &&
     ACCEPT_AUTHOR=\$(curl -sf -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/sweeper-accept-author) &&
+    [ -n \"\$REPO\" ] || { echo 'ERROR: sweeper-repo metadata missing' >&2; exit 1; } &&
     sudo env IMAGE=${IMAGE} REPO=\$REPO ACCEPT_AUTHOR=\$ACCEPT_AUTHOR docker compose -f /opt/sweeper/compose.yaml up -d
 "
 
 if [ "$DRY_RUN" = true ]; then
-    echo "  [dry-run] SSH to $VM_NAME: $RESTART_CMD"
+    echo "  [dry-run] SSH to $VM_NAME: docker login + pull + compose up"
 else
     gcloud compute ssh "$VM_NAME" \
         --zone="$ZONE" \

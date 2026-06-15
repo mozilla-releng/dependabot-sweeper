@@ -26,7 +26,7 @@ type Config struct {
 	Concurrency             int      // max PRs processed in parallel
 	MaxImplIterations       int      // max CI-fix resume turns per review cycle (initial turn not counted)
 	CIVerifyMaxWait         int      // seconds to wait for CI to settle after implementation push
-	MaxNoProgressIterations int      // consecutive identical-blocking-set iterations before giving up (default 3)
+	MaxNoProgressIterations int      // consecutive settled CI-fix attempts with no improvement in the failing-check floor before giving up (Q12; default 8)
 
 	CIStaleness time.Duration // a check pending longer than this (from creation) is "stale"
 	BotName     string        // git committer identity for impl commits
@@ -68,7 +68,7 @@ func FromEnv(opts ...Option) (*Config, error) {
 		cfg.CIVerifyMaxWait = 5400
 	}
 	if cfg.MaxNoProgressIterations == 0 {
-		cfg.MaxNoProgressIterations = 3
+		cfg.MaxNoProgressIterations = 8
 	}
 	if cfg.AnalyserModel == "" {
 		cfg.AnalyserModel = "claude-sonnet-4-6"
@@ -100,6 +100,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxImplIterations <= 0 {
 		return fmt.Errorf("--max-impl-iterations must be > 0, got %d", c.MaxImplIterations)
+	}
+	if c.MaxNoProgressIterations <= 0 {
+		return fmt.Errorf("--max-no-progress-iterations must be > 0, got %d", c.MaxNoProgressIterations)
 	}
 	if c.MaxImplTime <= 0 {
 		return fmt.Errorf("--max-impl-time must be > 0, got %d", c.MaxImplTime)
@@ -149,9 +152,12 @@ func WithReviewerModel(v string) Option { return func(c *Config) { c.ReviewerMod
 func WithReviewerThinkingBudget(v int) Option {
 	return func(c *Config) { c.ReviewerThinkingBudget = v }
 }
-func WithIgnoreChecks(v []string) Option     { return func(c *Config) { c.IgnoreChecks = v } }
-func WithConcurrency(v int) Option           { return func(c *Config) { c.Concurrency = v } }
-func WithMaxImplIterations(n int) Option     { return func(c *Config) { c.MaxImplIterations = n } }
+func WithIgnoreChecks(v []string) Option { return func(c *Config) { c.IgnoreChecks = v } }
+func WithConcurrency(v int) Option       { return func(c *Config) { c.Concurrency = v } }
+func WithMaxImplIterations(n int) Option { return func(c *Config) { c.MaxImplIterations = n } }
+func WithMaxNoProgressIterations(n int) Option {
+	return func(c *Config) { c.MaxNoProgressIterations = n }
+}
 func WithCIVerifyMaxWait(v int) Option       { return func(c *Config) { c.CIVerifyMaxWait = v } }
 func WithCIStaleness(v time.Duration) Option { return func(c *Config) { c.CIStaleness = v } }
 func WithBotName(v string) Option            { return func(c *Config) { c.BotName = v } }

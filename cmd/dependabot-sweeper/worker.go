@@ -28,6 +28,7 @@ type workerOptions struct {
 	maxImplTime            int
 	maxImplBudget          float64
 	maxImplIterations      int
+	maxNoProgressIters     int
 	maxReviewRetries       int
 	implModel              string
 	analyserModel          string
@@ -60,6 +61,7 @@ func parseWorkerFlags(args []string) (*workerOptions, error) {
 	fs.IntVar(&o.maxImplTime, "max-impl-time", 21600, "Maximum seconds for implementation phase")
 	fs.Float64Var(&o.maxImplBudget, "max-impl-budget", 50.00, "Maximum USD spend per PR for the implementation agent")
 	fs.IntVar(&o.maxImplIterations, "max-impl-iterations", 30, "Max CI-fix resume turns per review cycle")
+	fs.IntVar(&o.maxNoProgressIters, "max-no-progress-iterations", 8, "Give up after this many consecutive settled CI-fix attempts with no improvement in the failing-check count (Q12)")
 	fs.IntVar(&o.maxReviewRetries, "max-review-retries", 1, "Times to retry implementation after review rejection")
 	fs.StringVar(&o.implModel, "impl-model", "", "Model for implementation agent")
 	fs.StringVar(&o.analyserModel, "analyser-model", "", "Anthropic model for the analysis agent")
@@ -89,6 +91,7 @@ func buildWorkerConfig(o *workerOptions) (*config.Config, error) {
 		config.WithMaxImplTime(o.maxImplTime),
 		config.WithMaxImplBudget(o.maxImplBudget),
 		config.WithMaxImplIterations(o.maxImplIterations),
+		config.WithMaxNoProgressIterations(o.maxNoProgressIters),
 		config.WithMaxReviewRetries(o.maxReviewRetries),
 		config.WithCIVerifyMaxWait(o.ciVerifyMaxWait),
 		config.WithConcurrency(o.concurrency),

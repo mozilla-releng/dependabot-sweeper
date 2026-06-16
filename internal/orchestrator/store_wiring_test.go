@@ -413,3 +413,56 @@ func TestIdempotencySkipUsesStore(t *testing.T) {
 		t.Error("expected alreadyProcessed=false for different HeadSHA, got true")
 	}
 }
+
+// TestReportStageBlocksIllegalTransition is the Q8 wiring test: reportStage must
+// validate the transition against the workflow graph and refuse to write an illegal
+// one (e.g. finalized → pending). This is a cost-safety invariant — an illegal
+// transition could re-admit an already-processed PR into the expensive agentic step.
+func TestReportStageBlocksIllegalTransition(t *testing.T) {
+	s := openTestStore(t)
+	o := Orchestrator{store: s}
+
+	// Bring the PR to a terminal stage (finalized).
+	s.Report(77, "react", "major", models.StagePending, "")
+	s.Report(77, "react", "major", models.StageFinalized, "done")
+
+	got, ok := s.Get(77)
+	if !ok || got.Stage != models.StageFinalized {
+		t.Fatalf("setup: expected finalized stage, got stage=%q ok=%v", got.Stage, ok)
+	}
+	histBefore := len(got.History)
+
+	// Attempt an illegal transition: finalized → pending.
+	// reportStage must block this and NOT write anything to the store.
+	o.reportStage(77, "react", "major", models.StagePending, "attempted re-entry")
+
+	got, _ = s.Get(77)
+	if got.Stage != models.StageFinalized {
+		t.Errorf("illegal transition was not blocked: stage changed from finalized to %q", got.Stage)
+	}
+	if len(got.History) != histBefore {
+		t.Errorf("illegal transition was not blocked: history grew from %d to %d events", histBefore, len(got.History))
+	}
+}
+
+// TestReportStageAllowsLegalTransition verifies that reportStage correctly
+// forwards legal transitions to the store.
+func TestReportStageAllowsLegalTransition(t *testing.T) {
+	s := openTestStore(t)
+	o := Orchestrator{store: s}
+
+	// pending → analysing is a legal forward transition.
+	o.reportStage(88, "lodash", "minor", models.StagePending, "new PR")
+	o.reportStage(88, "lodash", "minor", models.StageAnalysing, "calling agent")
+
+	got, ok := s.Get(88)
+	if !ok {
+		t.Fatal("store has no entry for PR 88")
+	}
+	if got.Stage != models.StageAnalysing {
+		t.Errorf("legal transition was blocked: stage = %q, want analysing", got.Stage)
+	}
+	if len(got.History) != 2 {
+		t.Errorf("expected 2 history events after pending→analysing, got %d", len(got.History))
+	}
+}

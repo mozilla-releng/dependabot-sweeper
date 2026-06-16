@@ -20,6 +20,7 @@ import (
 	"github.com/mozilla-releng/dependabot-sweeper/internal/implementation"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/models"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/progress"
+	"github.com/mozilla-releng/dependabot-sweeper/internal/workflow"
 )
 
 // Orchestrator processes dependabot PRs with bounded concurrency (config.Concurrency).
@@ -92,10 +93,27 @@ func (o *Orchestrator) WithLogDir(dir string) *Orchestrator {
 }
 
 // reportStage is the nil-safe shim every progress update goes through.
+// It validates the transition against the workflow graph (Q8) before writing,
+// so an illegal stage transition (e.g. finalized → pending) is caught at the
+// point of recording rather than silently corrupting the stage history.
+// An illegal transition is logged at ERROR level and blocked — it is never
+// written to the store, because such a transition is a cost-safety violation
+// that could re-admit an already-processed PR into the expensive agentic step.
 func (o *Orchestrator) reportStage(prNumber int, pkg, bump string, stage models.PRStage, detail string) {
-	if o.store != nil {
-		o.store.Report(prNumber, pkg, bump, stage, detail)
+	if o.store == nil {
+		return
 	}
+	// Look up the current stage so we can validate the transition.
+	var prev models.PRStage
+	if stored, ok := o.store.Get(prNumber); ok {
+		prev = stored.Stage
+	}
+	if err := workflow.ValidateTransition(prev, stage); err != nil {
+		slog.Error("reportStage: blocking illegal transition",
+			"pr", prNumber, "from", prev, "to", stage, "error", err)
+		return // hard block — do not record the illegal transition
+	}
+	o.store.Report(prNumber, pkg, bump, stage, detail)
 }
 
 // reapClosed deletes store rows for PRs that are no longer in open. It is keyed

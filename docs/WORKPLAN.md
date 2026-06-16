@@ -349,21 +349,21 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
   tools. Remove from both the existing implementation agent and the combined agent. (This can
   land as a standalone fix before the rest of Phase 6.)
 - [ ] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
-  URL if the changelog is truncated" — with full tool access the agent can do this itself.
-- [ ] **Reframe pre-fetched upstream data as a hint, not the ceiling.** The orchestrator may still
-  pre-fetch release data for performance (saves the agent a round-trip on the happy path), but
-  the agent brief must make clear: "this is what we found quickly; if it is insufficient, fetch
-  more."
-- [ ] **Add the explicit hint-framing clause to the combined agent's brief.** The brief must
-  contain a clause such as: *"The following release data was pre-fetched as a performance
-  shortcut; if it is insufficient, incomplete, or truncated, fetch more directly."* This is a
-  concrete prompt change, not covered by the general 6.E review instruction.
+  URL if the changelog is truncated" — with full tool access the agent fetches what it needs.
+- [ ] **Do not pre-fetch upstream data for the agent.** The agent brief contains only what the
+  agent cannot derive itself: PR metadata (number, title, package, old version, new version)
+  and the working environment (working directory, clone path, role). Release notes, changelogs,
+  codebase snippets — the agent fetches and searches these autonomously. Pre-seeding upstream
+  data, even framed as a "hint", is the same pattern we are eliminating. Remove the
+  `GetUpstreamInfo` injection from the combined agent's brief entirely.
 - [ ] **Specify the combined agent's initial brief.** After Phase 3.2 removes the analyser,
   `BuildImplementationBrief` (`implementation.go:181–207`) can no longer forward
   `analysis.ReviewBody` / `analysis.CodeChanges` — there is no upstream analyser verdict.
-  Define what the combined agent starts from: PR metadata (number, title, package, versions),
-  the unified diff, and pre-fetched release hints. Define what it is expected to produce (the
-  WHY comment for recommend, or the replacement PR body for the fix path).
+  Define what the combined agent starts from: PR metadata only (number, title, package name,
+  old version, new version) plus the working environment (working directory, repo clone path,
+  role). The agent fetches everything else — diffs, release notes, changelogs — autonomously.
+  Define what it is expected to produce (the WHY comment for recommend, or the replacement PR
+  body for the fix path).
 - [ ] **Combined agent generates its own comment on the `recommend` path.** The approve-comment
   is currently produced from `analysis.ReviewBody` (`orchestrator.go:670`) — output of the
   tool-less analyser. After Phase 6, the combined agent must author this comment itself. The
@@ -536,9 +536,8 @@ Every agent prompt must be reviewed against the Agent Empowerment Principle in `
 Two concrete changes are already known from the audit — these must land as part of this item:
 
 - [ ] **Remove the dead-letter "follow the compare URL" instruction** from `analyser.go:46–47`.
-  This instruction cannot be followed because the analyser has no fetch tool. After Phase 6 the
-  combined agent has WebFetch — rewrite the instruction as "use your WebFetch tool to fetch the
-  compare URL and migration guide if the pre-fetched data is insufficient."
+  Remove it entirely — the combined agent fetches what it needs autonomously; no instruction
+  is needed to tell it to do so.
 - [ ] **Remove the epistemic-hedging patch** from `reviewer.go:187–194` ("Do NOT infer the absence
   of any change from this cut-off view; if the visible portion is insufficient to judge, say so").
   After 6.C, the reviewer has Bash access and can run `git diff` itself. Remove the hedge and

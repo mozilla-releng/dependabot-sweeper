@@ -101,10 +101,11 @@ For packages not discoverable via the fragile lookup chain, the agent receives n
 work from the PR body alone.
 
 #### Mitigation
-Give the agent WebFetch tools. Let it open the compare URL from the PR body, fetch the
-migration guide, read the full changelog. The orchestrator's pre-fetched release data can serve
-as a **performance hint** ("here is what we found quickly; go deeper if you need more") but
-must not be the ceiling. Remove the truncation-instruction dead letter from the prompt.
+Give the agent full tool access (`--dangerously-skip-permissions`) and a working directory with
+a repo clone. The agent brief contains only what it cannot derive itself — PR metadata (package,
+version range) and the working environment. The agent fetches release notes, changelogs, and
+migration guides autonomously using its tools. Remove `GetUpstreamInfo` injection from the
+brief entirely; remove the dead-letter "follow the compare URL" prompt instruction.
 
 ---
 
@@ -249,9 +250,8 @@ directly — no re-clone needed.
 Use this checklist when reviewing Phase 6 implementation to confirm all findings were closed:
 
 ### Stage 2 (codebase collection)
-- [ ] The 50-snippet cap in `codebase.go` is removed AND no pre-filtered snippet list is
-  provided as a primary source; pre-fetched data, if any, is framed as a performance hint
-  only and the agent is explicitly told it can search beyond it
+- [ ] The 50-snippet cap in `codebase.go` is removed AND `codebase.go` is deleted entirely
+  (once 6.D lands); no pre-filtered snippet list is injected into the agent brief
 - [ ] The agent can run `grep`/`find`/`rg` in the repo for specific symbol names
 - [ ] The codebase search is no longer performed before the agent reads upstream data
 - [ ] The agent's searches are driven by what it learns from the upstream data, not by a
@@ -263,10 +263,11 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
   or allowlist; the agent uses whatever it needs (verifiable by inspecting the
   `workerCommand`-equivalent function)
 - [ ] The dead-letter "follow the compare URL if the changelog is truncated" instruction in
-  `analyser.go:46–47` is replaced with a real WebFetch tool access instruction
-- [ ] The agent brief contains an explicit hint-framing clause ("this data was pre-fetched; use
-  WebFetch if it is insufficient")
-- [ ] Truncation limits in `GetUpstreamInfo` are either removed or explicitly framed as hints
+  `analyser.go:46–47` is removed; the combined agent fetches this itself
+- [ ] Pre-fetched upstream data (`GetUpstreamInfo`) is no longer injected into the combined
+  agent's brief; the agent brief contains only PR metadata and working environment context
+- [ ] Truncation limits in `GetUpstreamInfo` are irrelevant once the injection is removed;
+  `GetUpstreamInfo` may be deleted or kept only if it serves another purpose
 - [ ] The agent can discover and fetch upstream information for packages whose repos are not
   directly discoverable via the current fragile lookup chain
 

@@ -10,9 +10,15 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a ma
 > **Status (2026-06-16): PRs #1–#6 are MERGED into `main`** — Phase 0 (validated), Phase 1 (#1),
 > Phase 2 (#2), and the independent Phase-3 items Q12 (#3), Q5/Q6 (#4), Q7 (#5), Q14 (#6). Phase 5
 > docs are complete (two-PR-type lifecycle section added to ALGORITHM.md). `main` is green
-> (build/test/gofmt/staticcheck). Still open: the **analyser-removal cluster**
-> (3.0/3.2/3.2b/3.3/3.6/3.8 — agentic, needs a verified env; plan below) and **Phase 4** (UI, needs a
-> browser session). See `docs/questions.md` for the two maintainer decisions.
+> (build/test/gofmt/staticcheck).
+>
+> **The Phase 3.2 analyser-removal cluster is code-complete** on branch
+> `rework/phase3-2-cluster` (f84f711 spec.go / dc84af8 combined agent+guard / 57bd970
+> orchestrator wiring / dad881b Q13 curate / f5e0cdb Q15 justification). Build + unit tests pass;
+> **e2e verification against the live test bed is pending** before merging to main.
+>
+> Still open: **Phase 4** (UI, needs a browser session). See `docs/questions.md` for the two
+> maintainer decisions.
 
 ---
 
@@ -97,19 +103,20 @@ repo). Tick the phase when its items below are done.
   calls left on `pr.HeadSHA`). **PR #2 (merged).** ⚠️ Phase-0 surfaced a `-X theirs` rebase-pollution
   component this narrow fix doesn't fully clean — see `docs/questions.md`.
 - [~] **Phase 3 — Core rework** (large, interrelated). _Within-phase order deviated to bank
-  independent, verifiable wins first; the analyser-removal cluster (0/2/2b/3/6/8) is agentic and
-  can't be exercised in this environment — see `docs/questions.md` and the **Phase 3.2 plan** below.
+  independent, verifiable wins first; the analyser-removal cluster (0/2/2b/3/6/8) is code-complete
+  on branch `rework/phase3-2-cluster` — e2e verification pending before merging to main.
   PR numbers are draft PRs on this repo._
-  0. [ ] Reconcile `spec.go` to the post-Q10 state machine FIRST (review C2) — **deferred (cluster)**.
+  0. [x] Reconcile `spec.go` to the post-Q10 state machine. **f84f711** (branch).
   1. [x] Required-checks gating (Q7) — empty required set → all-checks (M2). **PR #5.**
-  2. [ ] One-agent step; remove the separate analyser (Q10) — **deferred (cluster; agentic, see plan)**.
-  2b. [ ] Q8 transition guard (after spec.go reconciled) — **deferred (cluster)**.
-  3. [ ] No-attribution + silent-draft + approve-only-when-green (Q1/Q2/Q3/Q4) — **deferred (cluster)**.
+  2. [x] One-agent step; combined agent replaces separate analyser (Q10). **dc84af8** (branch).
+  2b. [x] Q8 transition guard — `ValidateTransition` BFS guard in `workflow/guard.go`. **dc84af8** (branch).
+  3. [x] No-attribution + silent-draft + approve-only-green (Q1/Q2/Q3/Q4). **57bd970** (branch).
   4. [x] Group↔individual supersession (Q6). **PR #4.** (Q5 `--min-bump-to-engage` was also shipped here but has since been superseded — see Q5 in ALGORITHM.md.)
   5. [x] No-progress progress-metric, K=8 (Q12). **PR #3.**
-  6. [ ] Agent curates its own history (Q13) — **deferred (agentic; pairs with the cluster).**
+  6. [x] Agent curates its own history (Q13) — curateBranch + runCurateSubprocess. **dad881b** (branch).
   7. [x] Sweeper-PR naming + DB-record exclusion + pairing attribute (Q14). **PR #6.**
-  8. [ ] Worker-authored justification, private-through-review, posted on approval (Q15) — **deferred (agentic).**
+  8. [x] Worker-authored justification, private-through-review, posted on approval (Q15). **f5e0cdb** (branch).
+  **⚠ e2e verification against the live test bed required before merging to main.**
 - [ ] **Phase 4 — UI items — DEFERRED (needs a browser-capable session).** PR→GitHub link;
   `#183 / #204` pairing display. Not done autonomously: this is Svelte UI work and the project rule
   is to browser-smoke-test UI changes — not possible headlessly here, so shipping unverified
@@ -143,57 +150,30 @@ supporting features); Phases 4–5 are polish and durable documentation.
 
 ---
 
-## Phase 3.2 cluster — implementation plan (DEFERRED)
+## Phase 3.2 cluster — CODE-COMPLETE, e2e pending
 
 The analyser-removal cluster — **3.0 (spec.go reconcile), 3.2 (single agent), 3.2b (Q8 guard),
 3.3 (no-attribution/silent-draft/approve-only-green), 3.6 (Q13 curate), 3.8 (Q15 justification)** —
-was deliberately **not** shipped autonomously. Two reasons:
+is **code-complete on branch `rework/phase3-2-cluster`**. Build, unit tests, and staticcheck all
+pass. Key commits:
 
-1. **It can't be verified here.** These items are fundamentally about *agent behaviour* (prompts,
-   multi-turn reasoning, the analyse-then-decide flow). Exercising them needs a real
-   `ANTHROPIC_API_KEY` + the `claude` CLI against the test bed. Per the project rule "never imply
-   success you haven't observed," shipping an unexercised giant agentic refactor as "done" would be
-   dishonest. CI (build/test) passing is necessary but nowhere near sufficient here.
-2. **It is one tightly-coupled unit.** These steps collectively *define and implement* the new state
-   machine; landing them piecemeal risks an intermediate state where `spec.go` (the map) and the
-   code (the territory) disagree — strictly worse than today's drift. They should land together,
-   behind the optional Q10-rollback flag, then be e2e-verified.
+- **A. spec.go (3.0):** f84f711 — redraws to single-agent state machine; fixes BFS-unreachable
+  `reviewing` node; all spec tests pass.
+- **B. Single agent (3.2):** dc84af8 — `internal/agent` package (`CombinedAgent`); orchestrator
+  grows `runCombinedAgent` + `actOnAgentVerdict`; `--legacy-analyser` rollback flag.
+- **C. Q8 transition guard (3.2b):** dc84af8 — `internal/workflow/guard.go` (`ValidateTransition`,
+  `AllowedFrom`); BFS over spec graph; full test suite including resume-loop round-trip.
+- **D. No-attribution + silent-draft + approve-only-green (3.3):** 57bd970 — combined agent wired;
+  `gave_up` silent; `recommend` mechanical CI re-gate; no base-suppression.
+- **E. Q13 curate (3.6):** dad881b — `curateBranch` + `runCurateSubprocess` replace `squashBranch`
+  on the combined-agent path; `squashBranch` retained as legacy fallback.
+- **F. Q15 justification (3.8):** f5e0cdb — justification threaded through reviewer brief
+  (evaluated), `RunResult.Justification` propagated, posted to replacement PR body on approval via
+  `UpdatePRBody`; reviewer tests for `justification_ok` / `justification_concern`.
 
-Phases 2/3 already laid the groundwork the cluster reuses: the **post-rebase tip SHA**
-(`Pipeline.bumpTipSHA`, `RunResult.TipSHA`) is the canonical base the Q13 curate and the M1
-silent-draft outcome record against; **required-checks gating** is the green bar; the
-**reap-exempt `created_prs`** record is the cost-safety backstop.
-
-Recommended sequence when a verified environment is available:
-
-- **A. Reconcile `spec.go` (3.0).** Redraw to the single-agent flow: one agentic node that
-  analyses + decides, ending in `recommend` (comment), `finalized` (replacement PR),
-  `flagged_human` (concise reason), or `gave_up`/silent-draft. Keep `spec_test` green (every
-  `PRStage` a node). Reconcile the `error`-vs-`flagged` stage/outcome mismatch noted in Phase 1.
-- **B. Single agentic step (3.2).** Remove/repurpose `internal/analyser`; the orchestrator stops
-  calling `Analyse`. Every engaged PR goes to one agent with a live checkout that does its own
-  upstream + codebase analysis, then routes to one of the outcomes above. Rewrite the
-  implementation brief to own the analyse-and-decide responsibility (apply [[feedback-prompt-why]]).
-  Keep the reviewer on the fix path. Consider keeping the analyser path behind a flag for one
-  release (Q10 rollback).
-- **C. Q8 transition guard (3.2b).** A `Report`-layer guard validating stage→stage transitions,
-  collapsing decision **and** back edges (N2); reject/loud-log illegal ones. Test a resume-loop
-  round-trip. Cost-safety-critical (stops a processed PR re-entering the agent).
-- **D. No-attribution + silent-draft + approve-only-green (3.3).** Drop base-suppression as a
-  success criterion (genuine required-green is the bar). Silent failed draft must record a sticky
-  `gave_up` at the **post-rebase tip** (Phase 2's `TipSHA` — the plumbing is already in place) and
-  open the draft only after a non-empty SHA (M1/N3/N4). `recommend` is re-gated by a fresh
-  mechanical required-CI read in the orchestrator, never the agent's self-report (Q4/C3).
-- **E. Q13 curate (3.6).** Replace the orchestrator's blind `squashBranch` with an agent curate
-  step that soft-resets to `bumpTipSHA` and re-commits the work as one or more logical commits.
-- **F. Q15 justification (3.8).** Implementer authors a structured justification, held **private**
-  through the implementer↔reviewer loop, posted to the PR body on final approval (PR flips
-  draft→ready). Reviewer reviews it too and challenges over-long. Replaces the dead
-  `ReviewVerdict.Summary`.
-
-**Before marking any cluster PR ready:** run an e2e cycle against `petemoore/taskcluster` with a
-real key, watching that no PR re-enters the agentic pipeline in a loop (the cost-safety invariant),
-and confirm each outcome (recommend / replacement / flag / silent-draft) on a real PR.
+**Before merging to main:** run an e2e cycle against `petemoore/taskcluster` with a real key,
+watching that no PR re-enters the agentic pipeline in a loop (the cost-safety invariant), and
+confirm each outcome (recommend / replacement / flag / silent-draft) on a real PR.
 
 ---
 

@@ -220,22 +220,45 @@ mirror_one() {
   # Rebase the dependabot branch onto _patched_main. The dep branch may be
   # many commits behind upstream/main (dependabot doesn't always rebase), so
   # we must NOT start from its tree wholesale — that would make the fork PR diff
-  # include all the upstream progress it missed. Instead:
-  #   1. Find where the dep branch actually diverged from upstream/main.
-  #   2. Compute only the dep-specific changes (dep_base → dep_tip).
-  #   3. Start from _patched_main's tree and apply those changes on top.
+  # include all the upstream progress it missed.
+  #
+  # Correct approach (implemented below):
+  #   1. Find where the dep branch diverged from upstream/main (dep_base = C).
+  #   2. For each file dependabot changed (C → dep_tip), apply ONLY that diff
+  #      onto _patched_main's version of the file via `git apply --cached`.
+  #      This carries just the bump line, not the full ancient file state.
+  #   3. Fall back to blob transplant if the patch doesn't apply cleanly (e.g.
+  #      lockfiles whose surrounding context changed significantly since C).
+  #      The sweeper's implementation agent can repair lockfile regressions
+  #      during CI-fix iterations when this fallback is needed.
+  #
   # Result: fork PR diff = same files as the upstream PR diff (just the bump).
+  #
+  # !! IMPORTANT — do not revert step 2 to a direct blob transplant !!
+  # A blob transplant (update-index --cacheinfo with the blob from dep_tip)
+  # looks equivalent but is NOT: the dep_tip blob is the full file at C + bump,
+  # so transplanting it replaces _patched_main's modern content with the ancient
+  # state. This was the original bug (observed on mdi-react, dep branch 1,544
+  # commits behind main: package.json regressed to name=taskcluster-ui v86).
   dep_base=$(git -C "$CLONE_DIR" merge-base \
     "refs/remotes/origin/main" "refs/remotes/origin/$branch")
   git -C "$CLONE_DIR" read-tree "refs/heads/_patched_main"
   while IFS=$'\t' read -r status fpath; do
     case "$status" in
       M|A)
-        entry=$(git -C "$CLONE_DIR" ls-tree "refs/remotes/origin/$branch" "$fpath")
-        if [ -n "$entry" ]; then
-          mode=$(printf '%s' "$entry" | awk '{print $1}')
-          blob=$(printf '%s' "$entry" | awk '{print $3}')
-          git -C "$CLONE_DIR" update-index --cacheinfo "$mode,$blob,$fpath"
+        # Apply only the dep-specific diff (C → dep_tip) onto _patched_main's
+        # content for this file. Falls back to blob transplant if the patch
+        # context doesn't match (common for lockfiles; agent handles recovery).
+        if ! git -C "$CLONE_DIR" diff "$dep_base" "refs/remotes/origin/$branch" \
+               -- "$fpath" \
+             | git -C "$CLONE_DIR" apply --cached --ignore-whitespace - 2>/dev/null
+        then
+          entry=$(git -C "$CLONE_DIR" ls-tree "refs/remotes/origin/$branch" "$fpath")
+          if [ -n "$entry" ]; then
+            mode=$(printf '%s' "$entry" | awk '{print $1}')
+            blob=$(printf '%s' "$entry" | awk '{print $3}')
+            git -C "$CLONE_DIR" update-index --cacheinfo "$mode,$blob,$fpath"
+          fi
         fi
         ;;
       D) git -C "$CLONE_DIR" update-index --remove "$fpath" ;;

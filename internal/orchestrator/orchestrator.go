@@ -1114,6 +1114,10 @@ func (o *Orchestrator) actOnAgentVerdict(
 		if workdir != "" {
 			pipeline.WithWorkdir(workdir)
 		}
+		// Pass the justification for Q13 curate (agent authors logical commits at approval).
+		if verdict.Justification != "" {
+			pipeline.WithAgentJustification(verdict.Justification)
+		}
 
 		// For the combined agent path, the implementation brief is seeded from the
 		// agent's justification (not an analyser review_body). Wrap the justification

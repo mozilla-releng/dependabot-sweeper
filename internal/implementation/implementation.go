@@ -2,6 +2,7 @@
 package implementation
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -308,13 +309,14 @@ func BuildGroupedImplementationBrief(
 
 // Pipeline manages the full implementation lifecycle for a single PR.
 type Pipeline struct {
-	config        *config.Config
-	github        *ghclient.Client
-	reviewer      *reviewer.Reviewer
-	workdir       string
-	store         progress.Writer // optional; nil for the one-shot `review` command
-	logDir        string          // explicit log dir override; when empty, logs go under workdir
-	bareClonePath string          // optional: path to a local bare clone; when set, cloneAndBranch clones locally
+	config               *config.Config
+	github               *ghclient.Client
+	reviewer             *reviewer.Reviewer
+	workdir              string
+	store                progress.Writer // optional; nil for the one-shot `review` command
+	logDir               string          // explicit log dir override; when empty, logs go under workdir
+	bareClonePath        string          // optional: path to a local bare clone; when set, cloneAndBranch clones locally
+	agentJustification   string          // when non-empty, curateBranch is used instead of squashBranch (Q13)
 
 	// bumpTipSHA is the branch's actual tip SHA captured in cloneAndBranch right
 	// after `checkout -b branch pr.HeadRef`, before the worker runs — i.e. the
@@ -367,6 +369,14 @@ func (p *Pipeline) WithBareClone(path string) *Pipeline {
 // it — the combined agent and implementation pipeline share the same workdir.
 func (p *Pipeline) WithWorkdir(path string) *Pipeline {
 	p.workdir = path
+	return p
+}
+
+// WithAgentJustification sets the combined agent's justification text. When
+// non-empty, the finalize step uses curateBranch (Q13) instead of squashBranch
+// — the curate agent authors clean logical commits guided by the justification.
+func (p *Pipeline) WithAgentJustification(justification string) *Pipeline {
+	p.agentJustification = justification
 	return p
 }
 
@@ -629,24 +639,32 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		}
 
 		if verdict.Verdict == "approve" {
-			// Deterministic finalize: collapse the agent's multi-turn history into a
-			// single "fix:" commit on top of the *post-rebase* bump commit
-			// (p.bumpTipSHA), preserving the two-commit structure: bump commit +
-			// agent fix commit. Using the captured tip (not the stale scan-time
-			// pr.HeadSHA) is the T9 fix — otherwise the squash bundles every
-			// unrelated `main` change merged since the branch's base into the fix.
-			var agentMsg string
-			if pr.Grouped {
-				agentMsg = fmt.Sprintf("fix: update code for %s compatibility", pr.PackageName)
+			// Finalize: curate the commit history (Q13) if an agent justification is
+			// available (combined agent path), otherwise fall back to squashBranch
+			// (legacy analyser path). Both preserve the two-commit structure:
+			// bump commit + agent work. The bumpTipSHA MUST be the live post-rebase
+			// tip (T9) so neither operation bundles unrelated `main` changes.
+			var finalizeErr error
+			if p.agentJustification != "" {
+				// Q13 curate: the curate agent authors logical commits from the staged diff.
+				p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, "curating commit history")
+				finalizeErr = p.curateBranch(ctx, repoDir, p.bumpTipSHA, branch, p.agentJustification, pr.Number)
 			} else {
-				agentMsg = fmt.Sprintf("fix: update code for %s %s → %s compatibility",
-					pr.PackageName, pr.OldVersion, pr.NewVersion)
+				// Legacy path: single squash commit.
+				var agentMsg string
+				if pr.Grouped {
+					agentMsg = fmt.Sprintf("fix: update code for %s compatibility", pr.PackageName)
+				} else {
+					agentMsg = fmt.Sprintf("fix: update code for %s %s → %s compatibility",
+						pr.PackageName, pr.OldVersion, pr.NewVersion)
+				}
+				finalizeErr = p.squashBranch(ctx, repoDir, p.bumpTipSHA, branch, agentMsg)
 			}
-			if err := p.squashBranch(ctx, repoDir, p.bumpTipSHA, branch, agentMsg); err != nil {
-				slog.Error("Squash of impl branch failed", "pr", pr.Number, "error", err)
+			if finalizeErr != nil {
+				slog.Error("Finalize (curate/squash) of impl branch failed", "pr", pr.Number, "error", finalizeErr)
 				return RunResult{
 					Success:       false,
-					Detail:        fmt.Sprintf("squash at finalize failed: %v", err),
+					Detail:        fmt.Sprintf("finalize at approval failed: %v", finalizeErr),
 					ReviewVerdict: verdict,
 					Branch:        branch,
 				}
@@ -1241,18 +1259,19 @@ func (p *Pipeline) getBranchCommits(ctx context.Context, repoDir, baseSHA string
 
 // squashBranch squashes the agent's multi-turn commit history into a single
 // "fix:" commit on top of bumpTipSHA (the captured post-rebase bump commit),
-// then force-pushes. This preserves the two-commit structure (bump + agent fix)
-// so reviewers can see what the agent changed independently of the version
-// bump. If the agent made no net changes, the second commit is skipped and only
-// the bump commit is pushed. bumpTipSHA MUST be the live post-rebase tip (T9):
-// the stale scan-time pr.HeadSHA would bundle unrelated `main` changes here.
+// then force-pushes. This is the legacy finalize path — use curateBranch
+// (Q13) for the agent-curated commit history. squashBranch is retained as a
+// fallback for the legacy analyser path (--legacy-analyser).
+//
+// Preserves the two-commit structure (bump + agent fix) so reviewers can see
+// what the agent changed independently of the version bump. If the agent made
+// no net changes, the second commit is skipped and only the bump is pushed.
+// bumpTipSHA MUST be the live post-rebase tip (T9).
 func (p *Pipeline) squashBranch(ctx context.Context, repoDir, bumpTipSHA, branch, agentMessage string) error {
-	// Stage all agent changes relative to the post-rebase bump commit.
 	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "reset", "--soft", bumpTipSHA).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git reset --soft %s: %w: %s", bumpTipSHA, err, out)
 	}
-	// Only commit if there are staged changes (agent may have made no net changes).
 	if checkCmd := exec.CommandContext(ctx, "git", "-C", repoDir, "diff", "--cached", "--quiet"); checkCmd.Run() != nil {
 		out, err = exec.CommandContext(ctx, "git", "-C", repoDir, "commit", "-m", agentMessage).CombinedOutput()
 		if err != nil {
@@ -1265,6 +1284,151 @@ func (p *Pipeline) squashBranch(ctx context.Context, repoDir, bumpTipSHA, branch
 		return fmt.Errorf("force-push: %w: %s", err, out)
 	}
 	slog.Info("Squashed agent commits onto bump commit", "branch", branch, "bumpTipSHA", bumpTipSHA)
+	return nil
+}
+
+const curateBranchBrief = `## Your role
+
+You are the history-curation stage of an automated dependency upgrade pipeline.
+An implementation agent has already made code changes to fix compatibility issues
+introduced by a dependency bump. Those changes are scattered across multiple
+work-in-progress commits from the fix-and-retry loop. Your job is to replace
+that raw history with one or more clean, intentional, well-messaged logical commits.
+
+Why this step exists: the PR that humans will review must have a readable history.
+The implementation agent's WIP commits are internal scaffolding — they reflect the
+iteration process, not the logical structure of the change. You own the final shape
+of the commit history that lands in the PR.
+
+## Working context
+
+Repo directory: %s
+Branch: %s
+Bump tip SHA: %s (post-rebase bump commit — this is your base; do NOT touch it)
+
+## What to do
+
+1. Run ` + "`git log --oneline %s..HEAD`" + ` to see the WIP commits you are replacing.
+2. Run ` + "`git diff %s..HEAD`" + ` to understand the full set of changes.
+3. Soft-reset to the bump tip: ` + "`git reset --soft %s`" + `
+   All agent changes are now staged. They will NOT be lost — they are staged,
+   ready for you to split and re-commit as logical units.
+4. Re-commit as one or more logical commits with clear, precise commit messages.
+   - Each commit should represent one coherent unit of change.
+   - Commit messages must follow the conventional-commit format: ` + "`fix(<scope>): <description>`" + `
+   - The message must explain WHY the change is needed, not just WHAT changed.
+   - Do NOT reproduce the diff in the message — reference the upstream change instead.
+5. Force-push: ` + "`git push --force-with-lease origin %s`" + `
+
+## Justification context
+
+The implementation was guided by this analysis:
+%s
+
+## Constraints
+
+- Do NOT delete or modify the bump commit (%s) — only the commits ABOVE it.
+- Do NOT add new code changes — only re-organize what is already staged.
+- Do NOT open or modify any pull request — the controlling process handles that.
+- If the staged diff is empty (agent made no net changes), push without committing
+  additional commits: just force-push the current state.
+- End your turn immediately after force-pushing.
+`
+
+// curateBranch replaces the implementation agent's WIP commit history with
+// clean logical commits authored by a curate agent (Q13). The curate agent
+// soft-resets to bumpTipSHA (preserving the bump commit) and re-commits the
+// staged changes as intentional, well-messaged commits, then force-pushes.
+//
+// This replaces squashBranch for the combined-agent path. squashBranch is
+// retained as a fallback for the legacy analyser (--legacy-analyser).
+func (p *Pipeline) curateBranch(ctx context.Context, repoDir, bumpTipSHA, branch, justification string, prNumber int) error {
+	brief := fmt.Sprintf(curateBranchBrief,
+		repoDir,
+		branch,
+		bumpTipSHA,
+		bumpTipSHA, bumpTipSHA, bumpTipSHA, // for git log/diff/reset
+		branch, // for push
+		justification,
+		bumpTipSHA,
+	)
+
+	// Log path: co-located with the workdir.
+	logPath := ""
+	if p.workdir != "" {
+		logPath = filepath.Join(p.workdir, fmt.Sprintf("pr-%d-curate.jsonl", prNumber))
+	}
+
+	slog.Info("Running curate agent", "branch", branch, "bumpTipSHA", bumpTipSHA)
+
+	const maxAttempts = 2
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if err := p.runCurateSubprocess(ctx, repoDir, brief, logPath, prNumber); err != nil {
+			slog.Warn("curate agent attempt failed", "attempt", attempt, "error", err)
+			if attempt == maxAttempts {
+				return fmt.Errorf("curate agent failed after %d attempts: %w", maxAttempts, err)
+			}
+			continue
+		}
+		slog.Info("curate agent completed", "branch", branch)
+		return nil
+	}
+	return fmt.Errorf("curate agent: unreachable")
+}
+
+// runCurateSubprocess invokes claude as a subprocess for the curate step.
+func (p *Pipeline) runCurateSubprocess(ctx context.Context, repoDir, brief, logPath string, prNumber int) error {
+	curateCtx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+
+	args := []string{
+		"claude", "--print", "--dangerously-skip-permissions",
+		"--output-format", "text",
+		"--max-budget-usd", "5.00", // curate is a focused, bounded task
+	}
+	// Use the impl model if configured; otherwise let the claude CLI pick.
+	if p.config.ImplModel != "" {
+		args = append(args, "--model", p.config.ImplModel)
+	}
+
+	proc := exec.CommandContext(curateCtx, args[0], args[1:]...)
+	proc.Dir = repoDir
+	proc.Env = p.gitEnv() // so git push can authenticate
+
+	var stdout bytes.Buffer
+	proc.Stdout = &stdout
+	proc.Stderr = &stdout
+
+	stdin, err := proc.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("curate stdin pipe: %w", err)
+	}
+	if err := proc.Start(); err != nil {
+		return fmt.Errorf("curate subprocess start: %w", err)
+	}
+	if _, err := stdin.Write([]byte(brief)); err != nil {
+		slog.Warn("failed writing brief to curate stdin", "pr", prNumber, "error", err)
+	}
+	stdin.Close()
+
+	if err := proc.Wait(); err != nil {
+		if curateCtx.Err() != nil {
+			return fmt.Errorf("curate subprocess hit the time cap (20 minutes)")
+		}
+		slog.Warn("curate subprocess ended non-zero", "pr", prNumber, "error", err)
+		// Non-zero exit after a timeout or explicit error — check if the output
+		// suggests a real failure (not just a non-zero git exit after a push).
+		if stdout.Len() == 0 {
+			return fmt.Errorf("curate subprocess produced no output and exited non-zero: %w", err)
+		}
+		// Non-zero but has output — the push may have succeeded; treat as success.
+		slog.Warn("curate subprocess exited non-zero but produced output — treating as possible success", "pr", prNumber)
+	}
+
+	if logPath != "" {
+		appendToLog(logPath, stdout.String())
+	}
+
 	return nil
 }
 

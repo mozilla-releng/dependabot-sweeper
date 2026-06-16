@@ -914,6 +914,15 @@ func (p *Pipeline) cloneAndBranch(ctx context.Context, pr models.DependabotPR, b
 	repoDir := filepath.Join(p.workdir, "repo")
 	repoName := p.github.RepoFullName()
 
+	// If the repo directory already exists (e.g. the combined agent ran in this
+	// workdir and left its own clone behind), remove it so the clone starts clean.
+	if _, err := os.Stat(repoDir); err == nil {
+		slog.Info("Removing stale repo dir before clone", "path", repoDir)
+		if err := os.RemoveAll(repoDir); err != nil {
+			return "", fmt.Errorf("removing stale repo dir: %w", err)
+		}
+	}
+
 	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 

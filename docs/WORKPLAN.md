@@ -370,7 +370,7 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
   of changes from the cut-off view") — this is the wrong fix. With tool access the reviewer
   can check directly.
 
-### 6.D — Repo checkout and shared state
+### 6.D — Repo checkout, shared state, and directory lifecycle
 
 The current pipeline does multiple redundant repo operations (a shallow clone in `codebase.go`
 for grepping, a full clone in `implementation.go` for the agent). After Phase 3.2 and 6.A/6.B,
@@ -380,10 +380,47 @@ PR must not re-clone.
 - [ ] **Sequential agents on the same PR share one checkout.** Clone once (in the implementation
   pipeline); pass the repo directory to each subsequent stage. Remove the separate shallow clone
   in `codebase.go`.
+
 - [ ] **Concurrent PRs use git worktrees from a shared base clone.** `git worktree add` per PR
   from a shared base clone avoids redundant network I/O and disk use while keeping PR state
   isolated. Evaluate whether the existing per-PR worktree model in `implementation.go` already
   does this or clones fresh each time — if fresh, switch to worktrees.
+
+- [ ] **Shared base clone lifecycle.** The base clone is created once and re-fetched at the start
+  of each orchestrator scan cycle (a `git fetch` is fast; a full re-clone is not). It must be
+  cleaned up on process shutdown. It must not be shared across repos — the path must be scoped
+  per-repo (e.g. `sweeper-base/<owner>-<repo>/`).
+
+- [ ] **Per-PR worktree paths must be unique, repo-scoped, and PR-scoped.** Path generation must
+  include both the repo identity and the PR number so two PRs from different repos with the same
+  number don't collide, and so the path communicates its owner (e.g.
+  `sweeper-wt/<owner>-<repo>/pr-<N>/`). Do not rely on `os.MkdirTemp` random suffixes for
+  worktrees that need a stable, predictable path for handoff between sequential agents.
+
+- [ ] **No accidental directory sharing between agents that should be isolated.** For every
+  directory path in the pipeline, the answer to "which agents may access this path?" must be
+  explicit. Paths that are intended to be isolated must be guaranteed unique by construction —
+  not just "probably unique." Specifically:
+  - Two concurrent PRs must never resolve to the same worktree path, even transiently.
+  - An agent that should not see another PR's state must not be able to reach it via a
+    shared parent directory.
+  - If a path already exists at the start of a run (e.g. from a previous crashed run),
+    the code must detect it, remove it, and start clean — never silently reuse potentially
+    dirty state from a prior run.
+
+- [ ] **Agent log files must be PR-scoped, not shared.** Currently all agent logs go to
+  `os.TempDir()/sweeper-agent-logs/` with no PR scoping. Multiple concurrent agents interleave
+  logs in the same directory and the files are never cleaned up. Fix: scope logs under the
+  per-PR workdir so they are removed by the existing `Pipeline.cleanup()` call. This closes
+  both the collision problem (logs from different PRs mixed together) and the disk growth
+  problem (logs accumulate indefinitely on a long-running deployment).
+
+- [ ] **Same-package collision is prevented by the staleness gate, not by worktree isolation.**
+  `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the implementation
+  pipeline, so only the higher-version PR proceeds. Document this explicitly so future changes
+  don't accidentally move or remove the staleness check and unknowingly rely on worktree
+  isolation as the only guard. Worktree isolation is the backstop, not the primary defence.
+
 - [ ] **Explicit state handoff in every agent brief.** When sequential agents share a repo, each
   brief must state:
   - Branch name and HEAD SHA + commit message at handoff

@@ -176,12 +176,21 @@ verify they weren't weakened, and confirm coverage directly rather than hedging.
 
 ---
 
-## Cross-cutting: repo checkout and shared state
+## Cross-cutting: repo checkout, directory lifecycle, and isolation
 
-### Problem
-Currently the pipeline does multiple redundant repo operations:
-1. `codebase.go` shallow-clones the repo for pre-collection grepping
-2. The implementation pipeline clones a full repo into a worktree for the agent
+### Current state (before Phase 6)
+The pipeline currently does multiple redundant repo operations:
+1. `codebase.go` shallow-clones the repo for pre-collection grepping (separate, short-lived,
+   cleaned up immediately)
+2. `implementation.go` creates `os.MkdirTemp("", "sweeper-impl-*")` per PR for the agent's
+   full clone; `defer p.cleanup()` removes it when `Pipeline.Run()` returns — so per-PR
+   workdir cleanup works correctly today
+3. `manualRebase()` creates a separate `os.MkdirTemp("", "sweeper-rebase-*")` with its own
+   `defer os.RemoveAll` — also cleaned up correctly
+
+**Known gap in the current code:** Agent log files go to `os.TempDir()/sweeper-agent-logs/`
+(hardcoded at `implementation.go:959`). This path is shared across all concurrent PRs and is
+never cleaned up. On a long-running deployment, agent log files accumulate indefinitely.
 
 After the Phase 6 redesign, the combined analyse+implement agent needs the repo for both
 analysis AND implementation. A separate reviewer step also needs the same repo state.
@@ -256,9 +265,24 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
 - [ ] The reviewer runs in the repo directory and can run `git diff` itself
 - [ ] The epistemic-hedging instruction about the 50k diff cap is removed from the prompt
 
-### Repo sharing
-- [ ] Sequential agents on the same PR share a repo checkout; no redundant clones
-- [ ] Concurrent PRs use git worktrees from a shared base clone
+### Repo sharing, directory lifecycle, and isolation
+- [ ] Sequential agents on the same PR share one repo checkout; no redundant clones
+- [ ] Concurrent PRs use git worktrees from a shared base clone (`git worktree add`)
+- [ ] Shared base clone is repo-scoped (path includes owner+repo); re-fetched each scan cycle;
+  cleaned up on process shutdown
+- [ ] Per-PR worktree paths are repo-scoped AND PR-scoped (e.g. `sweeper-wt/<owner>-<repo>/pr-<N>/`);
+  no two PRs — including PRs from different repos with the same number — can resolve to the
+  same path
+- [ ] No accidental directory sharing between agents that should be isolated: every directory
+  path has a documented answer to "which agents may access this?"; paths intended to be isolated
+  are guaranteed unique by construction, not by probabilistic random suffixes
+- [ ] Stale path detection: if a per-PR worktree path already exists at run start (crash
+  residue), it is removed and recreated — never silently reused as potentially dirty state
+- [ ] Agent log files are scoped under the per-PR workdir, not under a shared
+  `os.TempDir()/sweeper-agent-logs/`; they are removed by `Pipeline.cleanup()`
+- [ ] The staleness gate (`FindNewerPRForPackage` in Step 1) is documented as the primary guard
+  against same-package parallel processing; worktree isolation is the backstop, not the
+  primary defence; a comment or test pins this ordering assumption
 - [ ] Each agent's brief includes explicit repo state at handoff (branch, HEAD, cleanliness,
   who left the current state, what is expected)
 

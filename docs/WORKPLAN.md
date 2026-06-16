@@ -7,9 +7,9 @@ the commit/PR.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a maintainer decision first.
 
-> **Status (2026-06-16): Phase 3.2 cluster MERGED to `main`** — combined agent, Q8 guard,
-> Q3 silent-draft, Q13 curate, Q15 justification, Phase 6 quick wins (6.A/6.C/6.D/6.E),
-> and Phase 6.B (codebase.go removed) are all on `main`. Build/test/staticcheck green.
+> **Status (2026-06-16): Phase 3.2 cluster + Phase 6 (6.A–6.E) fully MERGED to `main`** —
+> combined agent, Q8 guard, Q3 silent-draft, Q13 curate, Q15 justification, Phase 6 quick wins
+> (6.A/6.C/6.D/6.E open items), Phase 6.B (codebase.go removed). Build/test/staticcheck green.
 > **E2e verification against the live test bed is still pending** (required before claiming
 > Phase 3.2 fully done per WORKPLAN). Phase 6.F (mdi-react regression test) is next.
 >
@@ -535,27 +535,20 @@ reviewer knows it is reviewing a revision, not a fresh submission.
   (`implementation.go:316`) to serve the agent-log endpoint. Update it to construct the new
   per-PR log path from the canonical schema. **Done in 08545ac (`WithDataDir` in web/server.go).**
 
-- [ ] **Resolve `manualRebase` sequencing vs PR-keyed root.** `manualRebase` creates its own
-  `os.MkdirTemp("", "sweeper-rebase-*")` with `defer os.RemoveAll` and runs *before*
-  `p.workdir` is created (`implementation.go:415–433`). Either create the PR-keyed root before
-  calling `manualRebase` (so the rebase can use a subdirectory of it), or keep the rebase temp
-  dir as a documented short-lived exception outside the PR root.
+- [x] **Resolve `manualRebase` sequencing vs PR-keyed root.** Kept as a documented
+  short-lived exception: a comment above `os.MkdirTemp` in `manualRebase` explains that the
+  rebase temp dir exists only for the duration of the rebase (cleaned up by defer) and always
+  completes before `p.workdir` is created. **f63d953.**
 
 - [x] **Same-package collision is prevented by the staleness gate, not by directory isolation.**
   `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the pipeline, so
   only the higher-version PR proceeds. Document this explicitly — directory isolation is the
   backstop, not the primary defence. **Done in 08545ac (comment near `FindNewerPRForPackage`).**
 
-- [ ] **Impl → reviewer brief.** The reviewer is handed the same `<workdir>` as the implementing
-  agent. Its brief must include:
-  ```
-  Working directory: <workdir>
-  Repo clone:        <workdir>/repo/
-  Branch:            <name>
-  HEAD:              <sha> ("<commit message>")
-  Turn:              <N>  (1 = first review; 2+ = reviewing revised implementation)
-  ```
-  The reviewer works directly in `<workdir>/repo/` — no re-clone needed.
+- [x] **Impl → reviewer brief.** `BuildBrief` and `Review` now take `workdir` and `headSHA`
+  parameters. The brief includes Working directory, Repo clone path, Branch, HEAD SHA, Bump tip
+  SHA, and Turn number. HEAD SHA is obtained via `git rev-parse HEAD` in `implementation.go`
+  before calling `Review`. Tests updated; new `TestBuildBrief_IncludesWorkdirAndHEAD`. **f63d953.**
 
 ### 6.E — Agent prompts: role, purpose, and workflow context
 
@@ -571,10 +564,14 @@ Two concrete changes are already known from the audit — these must land as par
   replace with: "Use `git diff` to read the full diff; there is no size cap."
   **Done: reviewer.go was rewritten entirely; the hedge is gone; the `git diff` instruction is
   in the new brief's tool section.**
-- [ ] Each prompt explains the agent's role, *why* that role exists, and how it fits the overall
-  workflow (the context helps the agent reason about edge cases it wasn't explicitly instructed on).
-- [ ] No prompt contains instructions the agent structurally cannot follow.
-- [ ] No prompt substitutes epistemic hedging for actual tool access.
+- [x] Each prompt explains the agent's role, *why* that role exists, and how it fits the overall
+  workflow. `reviewerBrief`, `implementationBrief`, and `groupedImplementationBrief` each gained
+  a "Why this role exists" paragraph with the maintainer-perspective context. `combinedAgentBrief`
+  and `curateBranchBrief` already had sufficient why context. **f63d953.**
+- [x] No prompt contains instructions the agent structurally cannot follow. Audited all four
+  prompts — no impossible instructions found. **f63d953.**
+- [x] No prompt substitutes epistemic hedging for actual tool access. Epistemic hedging was
+  removed in earlier phases (08545ac); audit confirmed no new hedging introduced. **f63d953.**
 
 ### 6.F — Regression test (mdi-react)
 

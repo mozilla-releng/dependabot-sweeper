@@ -600,10 +600,18 @@ This is the end-to-end verification that the principles fixed the problem, not j
 
 ## UI / dashboard (tracked in backlog memory too)
 
-- [ ] **Link the sidebar PR number to the actual GitHub PR.** `models.DependabotPR.URL` exists but
-  isn't persisted/exposed; plumb through `PRProgress` + web API.
-- [ ] **Show the dependabot↔sweeper pairing (`#183 / #204`)** in PR boxes, with sidebar navigation
-  to either and out to GitHub. Needs the reverse link from T12/Q14.
+- [x] **Link the sidebar PR number to the actual GitHub PR.** Done — `pr_url` persisted via
+  `SetVersions`; `PRProgress.URL` in API; sidebar links when `url` present.
+- [x] **Show the dependabot↔sweeper pairing (`#295 → #298`)** on the card and in the sidebar.
+  PR number on card is a link; `→ #N` replacement shown alongside it; both linked. (`562248a`)
+- [ ] **BUG: Agent log viewer in UI shows empty log.** The log file exists at
+  `/var/lib/sweeper/agent-logs/pr-<N>-agent.jsonl` (277 lines observed for PR #296) but the
+  dashboard log tab appears empty. Likely cause: the web server's log-serving endpoint uses the
+  per-PR `DataDir` path (Phase 6.D `WithDataDir`) but compose.yaml passes `--log-dir` which
+  overrides it, so the worker writes to `agent-logs/` while the web server looks elsewhere — or
+  the JSONL viewer is failing silently on large structured input. Needs investigation: check
+  whether `/api/v1/prs/<N>/log` returns content, then fix either the path resolution or the
+  frontend renderer.
 
 ---
 

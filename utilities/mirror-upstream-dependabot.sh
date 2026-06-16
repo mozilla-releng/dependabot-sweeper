@@ -217,15 +217,21 @@ mirror_one() {
 
   say "  [$((i+1))/$UCOUNT] upstream #$num  $branch@${sha:0:8}"
 
-  # Rebase the dependabot branch onto _patched_main so that every PR branch
-  # already contains the testbed patches. Uses index manipulation (no working
-  # tree): load the dep branch tree, overlay the files changed by our patches,
-  # write a new tree, and create a fresh commit parented on _patched_main.
-  git -C "$CLONE_DIR" read-tree "refs/remotes/origin/$branch"
+  # Rebase the dependabot branch onto _patched_main. The dep branch may be
+  # many commits behind upstream/main (dependabot doesn't always rebase), so
+  # we must NOT start from its tree wholesale — that would make the fork PR diff
+  # include all the upstream progress it missed. Instead:
+  #   1. Find where the dep branch actually diverged from upstream/main.
+  #   2. Compute only the dep-specific changes (dep_base → dep_tip).
+  #   3. Start from _patched_main's tree and apply those changes on top.
+  # Result: fork PR diff = same files as the upstream PR diff (just the bump).
+  dep_base=$(git -C "$CLONE_DIR" merge-base \
+    "refs/remotes/origin/main" "refs/remotes/origin/$branch")
+  git -C "$CLONE_DIR" read-tree "refs/heads/_patched_main"
   while IFS=$'\t' read -r status fpath; do
     case "$status" in
       M|A)
-        entry=$(git -C "$CLONE_DIR" ls-tree "refs/heads/_patched_main" "$fpath")
+        entry=$(git -C "$CLONE_DIR" ls-tree "refs/remotes/origin/$branch" "$fpath")
         if [ -n "$entry" ]; then
           mode=$(printf '%s' "$entry" | awk '{print $1}')
           blob=$(printf '%s' "$entry" | awk '{print $3}')
@@ -235,7 +241,7 @@ mirror_one() {
       D) git -C "$CLONE_DIR" update-index --remove "$fpath" ;;
     esac
   done < <(git -C "$CLONE_DIR" diff-tree -r --name-status \
-    "refs/remotes/origin/main" "refs/heads/_patched_main")
+    "$dep_base" "refs/remotes/origin/$branch")
   merged_tree=$(git -C "$CLONE_DIR" write-tree)
   dep_msg=$(git -C "$CLONE_DIR" log -1 --format="%B" "refs/remotes/origin/$branch")
   rebased_sha=$(git -C "$CLONE_DIR" commit-tree "$merged_tree" \

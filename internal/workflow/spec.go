@@ -2,6 +2,11 @@
 // truth for what the tool does. The spec_test.go verifies the graph stays
 // consistent with the real models.PRStage constants, so adding a new stage to
 // the code without updating this file fails the build.
+//
+// Post-Q10 state machine: the separate analyser is eliminated. Every engaged
+// PR goes through a single combined agentic step (analyse + decide + implement
+// if needed). The old two-step flow (analyse then route to impl) is replaced by
+// one flow where the agent itself decides the outcome.
 package workflow
 
 import "github.com/mozilla-releng/dependabot-sweeper/internal/models"
@@ -27,7 +32,7 @@ type Node struct {
 	ID      string   `json:"id"`
 	Kind    NodeKind `json:"kind"`
 	Label   string   `json:"label"`
-	Phase   string   `json:"phase,omitempty"`  // Queued|Analysing|Implementing|CI+Review|Done+Flagged
+	Phase   string   `json:"phase,omitempty"`  // Queued|Agent|Implementing|CI+Review|Done+Flagged
 	Summary string   `json:"summary"`          // one sentence — what this node means
 	Detail  string   `json:"detail,omitempty"` // optional short paragraph for the explainer
 	Where   string   `json:"where,omitempty"`  // code anchor, e.g. "orchestrator.go:processPR"
@@ -73,7 +78,7 @@ func Spec() Graph {
 		EntryID: string(models.StagePending),
 		Nodes: []Node{
 
-			// ── Stage nodes (one per models.PRStage constant) ──────────────
+			// Stage nodes (one per models.PRStage constant)
 
 			// Entry
 			{
@@ -98,10 +103,10 @@ func Spec() Graph {
 			{
 				ID:      string(models.StageAnalysing),
 				Kind:    NodeKindTransient,
-				Label:   "Analysing",
-				Phase:   "Analysing",
-				Summary: "The analyser is fetching upstream changelog/release notes and assessing the bump.",
-				Detail:  "For non-grouped PRs: fetch package metadata, check codebase usage, then call the Claude analyser. For grouped PRs: analyse the combined diff and member list.",
+				Label:   "Agent running",
+				Phase:   "Agent",
+				Summary: "The combined agent is analysing the upstream changes and codebase impact, then deciding what to do.",
+				Detail:  "A single agentic step (Q10): the agent has a live repo checkout and full tool access. It fetches upstream data, searches the codebase, and ends in: recommend (comment with WHY, required-CI mechanically re-gated), finalized (replacement PR with justification), flagged_human (concise reason), or gave_up (silent draft). Green required-CI alone is not sufficient to recommend — the agent must reason about upstream changes.",
 				Where:   "orchestrator.go:processPR step 6",
 			},
 			{
@@ -128,7 +133,7 @@ func Spec() Graph {
 				Kind:    NodeKindActive,
 				Label:   "Impl running",
 				Phase:   "Implementing",
-				Summary: "The implementation agent is making the code changes (first turn).",
+				Summary: "The combined agent is making code changes (first turn).",
 				Where:   "implementation.go:Pipeline.Run:turn1",
 			},
 			{
@@ -145,7 +150,7 @@ func Spec() Graph {
 				Kind:    NodeKindActive,
 				Label:   "Reviewing",
 				Phase:   "CI+Review",
-				Summary: "The reviewer agent is judging the quality and correctness of the agent's changes.",
+				Summary: "The independent reviewer agent is judging the code changes and the justification (Q15).",
 				Where:   "implementation.go:Pipeline.Run:reviewGate",
 			},
 
@@ -155,18 +160,18 @@ func Spec() Graph {
 				Kind:    NodeKindTerminal,
 				Label:   "Recommended",
 				Phase:   "Done+Flagged",
-				Summary: "The bump looks correct as-is; the tool posts a recommendation for a maintainer to merge.",
-				Detail:  "The tool proposes, it does not approve: a comment with the assessment is posted and a human decides whether to merge. It never submits a native GitHub APPROVE review (which could trigger auto-merge with no human in the loop). Idempotent — the sticky comment is edited in place, not reposted.",
-				Where:   "orchestrator.go:actOnAnalysis:approve",
+				Summary: "The bump looks correct as-is; the tool posts a recommendation (with a concrete WHY) after re-verifying required-CI is green.",
+				Detail:  "The tool proposes, it does not approve: a comment with the agent's WHY is posted and a human decides whether to merge. It never submits a native GitHub APPROVE review. Idempotent — the sticky comment is edited in place, not reposted. The recommend outcome is re-gated by a fresh mechanical required-CI read in the orchestrator — never by the agent's self-report (Q4/C3).",
+				Where:   "orchestrator.go:actOnAgentVerdict:recommend",
 			},
 			{
 				ID:      string(models.StageFinalized),
 				Kind:    NodeKindTerminal,
 				Label:   "Finalized",
 				Phase:   "Done+Flagged",
-				Summary: "A replacement PR containing the code fix has been opened and the original was closed.",
-				Detail:  "The agent's work is squashed into a single 'fix:' commit on top of the dependabot bump commit (two-commit structure), pushed, and a new PR is opened. The original dependabot PR is closed with a reference to the replacement.",
-				Where:   "orchestrator.go:actOnAnalysis + implementation.go:squashBranch",
+				Summary: "A replacement PR has been opened (draft to ready) and the original closed. Justification posted to PR body.",
+				Detail:  "The agent curates its work into logical commits on top of the bump commit (Q13). The reviewer approves both code and justification (Q15). The PR is un-drafted and the original closed. The justification is posted to the PR body only on final approval — private through the impl/reviewer loop.",
+				Where:   "orchestrator.go:actOnAgentVerdict + implementation.go:curateBranch",
 			},
 			{
 				ID:      string(models.StageSkipped),
@@ -181,29 +186,29 @@ func Spec() Graph {
 				Kind:    NodeKindTerminal,
 				Label:   "Flagged",
 				Phase:   "Done+Flagged",
-				Summary: "Needs human attention — pre-existing CI failures, low confidence, implementation failure, or review exhausted.",
-				Detail:  "The Principle: if there's no high-confidence insight, say nothing. Flagging posts a concise one-line note only when confidence is high enough to be useful.",
-				Where:   "orchestrator.go:actOnAnalysis + implementation.go:Pipeline.Run",
+				Summary: "Needs human attention — the agent has a concise, purpose-built reason it cannot resolve autonomously.",
+				Detail:  "Every human-attention flag must carry a concise, purpose-built explanation — never a review-body dump. This is a last resort, emitted only when the agent has a specific insight it cannot handle itself.",
+				Where:   "orchestrator.go:actOnAgentVerdict + implementation.go:Pipeline.Run",
 			},
 			{
 				ID:      string(models.StageGaveUp),
 				Kind:    NodeKindTerminal,
 				Label:   "Gave up",
 				Phase:   "Done+Flagged",
-				Summary: "Gave up trying to fix CI — the same failures persisted beyond the iteration or time cap.",
-				Detail:  "Reached when the CI-fix loop exhausts its iteration/time cap, trips the no-progress guard, or post-squash CI fails to settle. A concise one-line reason is posted and the outcome is recorded sticky at the head SHA, so the next scan skips the PR until dependabot pushes a new commit.",
-				Where:   "implementation.go:decideCIFixLoop → ciFixGiveUp",
+				Summary: "Gave up trying to fix CI. A silent draft is left open; no comment is posted.",
+				Detail:  "Reached when the CI-fix loop exhausts its iteration/time cap, trips the no-progress guard, or post-curate CI fails. A sticky gave_up outcome is recorded at the post-rebase tip SHA (not the scan-time SHA, which drifts after rebase), so the next scan skips this PR until dependabot pushes a new commit. The replacement stays a silent draft — no noise.",
+				Where:   "implementation.go:decideCIFixLoop -> ciFixGiveUp",
 			},
 			{
 				ID:      string(models.StageError),
 				Kind:    NodeKindTerminal,
 				Label:   "Error",
 				Phase:   "Done+Flagged",
-				Summary: "Unexpected error (e.g. analysis API failure); the PR will be retried next cycle.",
-				Where:   "orchestrator.go:processPR (analysis error path)",
+				Summary: "Unexpected error; the PR will be retried next cycle.",
+				Where:   "orchestrator.go:processPR (error path)",
 			},
 
-			// ── Decision nodes (rendered as diamonds) ──────────────────────
+			// Decision nodes (rendered as diamonds)
 			{
 				ID:      "dec_early_exit",
 				Kind:    NodeKindDecision,
@@ -219,37 +224,37 @@ func Spec() Graph {
 				Where:   "orchestrator.go:processPR step 3 (pr.CI.Settled)",
 			},
 			{
-				ID:      "dec_analysis_routing",
+				ID:      "dec_agent_verdict",
 				Kind:    NodeKindDecision,
-				Label:   "Verdict?",
-				Summary: "Based on CI state, confidence, and analyser verdict: approve, fix, flag, or error?",
-				Detail:  "Routing priority: (1) CI not acceptable + verdict≠needs_changes → flag. (2) Low confidence → flag. (3) needs_human_review → flag. (4) approve → recommend merge (comment, not an approval). (5) needs_changes → impl path.",
-				Where:   "orchestrator.go:actOnAnalysis",
+				Label:   "Agent verdict?",
+				Summary: "What did the combined agent decide? Recommend, replacement PR, flag, or gave up?",
+				Detail:  "The combined agent analyses upstream changes, searches the codebase, and ends in one of four outcomes. Recommend: required-CI green + agent judged no change needed (re-gated mechanically by orchestrator). Replacement PR: changes needed. Flag: specific insight it cannot resolve. Gave-up/silent-draft: could not reach a confident verdict.",
+				Where:   "orchestrator.go:actOnAgentVerdict",
 			},
 			{
 				ID:      "dec_replacement_exists",
 				Kind:    NodeKindDecision,
 				Label:   "Replacement exists?",
 				Summary: "Does a replacement PR already exist for this branch (idempotency guard)?",
-				Where:   "orchestrator.go:actOnAnalysis (FindPRByBranch)",
+				Where:   "orchestrator.go:actOnAgentVerdict (FindPRByBranch)",
 			},
 			{
 				ID:      "dec_ci_gate",
 				Kind:    NodeKindDecision,
 				Label:   "CI ok?",
-				Summary: "After the agent commits: is CI acceptable, still running, or has the loop hit its cap?",
+				Summary: "After the agent commits: are required CI checks acceptable, still running, or has the loop hit its cap?",
 				Where:   "implementation.go:Pipeline.Run CI-fix loop",
 			},
 			{
 				ID:      "dec_review_gate",
 				Kind:    NodeKindDecision,
 				Label:   "Review?",
-				Summary: "Reviewer verdict: approve the changes, or request changes (with retries remaining)?",
+				Summary: "Reviewer verdict on code + justification: approve, or request changes (retries remaining)?",
 				Where:   "implementation.go:Pipeline.Run review gate",
 			},
 		},
 		Edges: []Edge{
-			// Entry → early-exit check
+			// Entry to early-exit check
 			{From: "pending", To: "dec_early_exit", Kind: EdgeKindNormal},
 
 			// Early-exit outcomes
@@ -260,14 +265,15 @@ func Spec() Graph {
 			{From: "dec_ci_settled", To: "ci_settling", Label: "CI still running", Kind: EdgeKindDecision},
 			{From: "dec_ci_settled", To: "analysing", Label: "CI settled", Kind: EdgeKindDecision},
 
-			// Analysis
-			{From: "analysing", To: "error", Label: "analysis error", Kind: EdgeKindNormal},
-			{From: "analysing", To: "dec_analysis_routing", Kind: EdgeKindNormal},
+			// Combined agent
+			{From: "analysing", To: "error", Label: "agent error", Kind: EdgeKindNormal},
+			{From: "analysing", To: "dec_agent_verdict", Kind: EdgeKindNormal},
 
-			// Analysis routing
-			{From: "dec_analysis_routing", To: "flagged_human", Label: "CI failing (pre-existing) / low confidence / needs_human_review", Kind: EdgeKindDecision},
-			{From: "dec_analysis_routing", To: "approved", Label: "recommend merge", Kind: EdgeKindDecision},
-			{From: "dec_analysis_routing", To: "dec_replacement_exists", Label: "needs_changes", Kind: EdgeKindDecision},
+			// Agent verdict routing
+			{From: "dec_agent_verdict", To: "flagged_human", Label: "flag for human (concise reason)", Kind: EdgeKindDecision},
+			{From: "dec_agent_verdict", To: "gave_up", Label: "gave up / silent draft", Kind: EdgeKindDecision},
+			{From: "dec_agent_verdict", To: "approved", Label: "recommend merge (required-CI re-gated by orchestrator)", Kind: EdgeKindDecision},
+			{From: "dec_agent_verdict", To: "dec_replacement_exists", Label: "needs changes -> impl path", Kind: EdgeKindDecision},
 
 			// Replacement idempotency
 			{From: "dec_replacement_exists", To: "finalized", Label: "replacement already exists", Kind: EdgeKindDecision},
@@ -286,7 +292,7 @@ func Spec() Graph {
 			{From: "dec_ci_gate", To: "dec_review_gate", Label: "CI acceptable", Kind: EdgeKindDecision},
 
 			// Review gate
-			{From: "dec_review_gate", To: "finalized", Label: "reviewer approves", Kind: EdgeKindDecision},
+			{From: "dec_review_gate", To: "finalized", Label: "reviewer approves code + justification", Kind: EdgeKindDecision},
 			{From: "dec_review_gate", To: "impl_resuming", Label: "reviewer requests changes, retries remain", Kind: EdgeKindBack},
 			{From: "dec_review_gate", To: "flagged_human", Label: "reviewer requests changes, retries exhausted", Kind: EdgeKindDecision},
 		},

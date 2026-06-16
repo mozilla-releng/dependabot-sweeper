@@ -321,9 +321,13 @@ The centrepiece is the fix-first rework; the rest support it.
 
 ## Phase 6 — Agent pipeline empowerment redesign
 
-**Prerequisite:** Phase 3.2 cluster (single combined agent) should land first or alongside.
-Phase 6 builds on the single-agent model; designing empowered information gathering into a
-two-agent (analyser + implementer) architecture wastes effort since Phase 3.2 removes that split.
+**Prerequisite:** Phase 3.2 cluster (single combined agent) should land first or alongside for
+items 6.A, 6.B, and 6.D. **6.C (reviewer empowerment) and the agent-log scoping fix in 6.D are
+independent of Phase 3.2 and can ship before it — treat them as quick wins.**
+
+**Rollback:** If Phase 6 is deployed and the mdi-react regression test (6.F) fails, the rollback
+state is the last green commit before Phase 6 changes. Document and test the rollback procedure
+before deploying to GCP.
 
 **Audit reference:** `docs/AGENT_PIPELINE_AUDIT.md` — read this before implementing any item
 below. It contains the full findings, the concrete failure scenarios, and the post-implementation
@@ -348,6 +352,31 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
   pre-fetch release data for performance (saves the agent a round-trip on the happy path), but
   the agent brief must make clear: "this is what we found quickly; if it is insufficient, fetch
   more."
+- [ ] **Add the explicit hint-framing clause to the combined agent's brief.** The brief must
+  contain a clause such as: *"The following release data was pre-fetched as a performance
+  shortcut; if it is insufficient, incomplete, or truncated, use your WebFetch tool to retrieve
+  more."* This is a concrete prompt change, not covered by the general 6.E review instruction.
+- [ ] **CRITICAL — verify `--bare` does not suppress WebFetch.** The current worker command
+  includes `--bare` (`implementation.go:1057`). If `--bare` suppresses built-in tools like
+  WebFetch in the Claude CLI, the combined agent will be tool-less in practice despite the
+  intent of this item. Verify before writing any 6.A code. If `--bare` suppresses WebFetch or
+  Bash, remove `--bare` from the combined agent invocation or replace it with an explicit
+  allowlist that includes WebFetch, Bash, and Read.
+- [ ] **Specify the combined agent's initial brief.** After Phase 3.2 removes the analyser,
+  `BuildImplementationBrief` (`implementation.go:181–207`) can no longer forward
+  `analysis.ReviewBody` / `analysis.CodeChanges` — there is no upstream analyser verdict.
+  Define what the combined agent starts from: PR metadata (number, title, package, versions),
+  the unified diff, and pre-fetched release hints. Define what it is expected to produce (the
+  WHY comment for recommend, or the replacement PR body for the fix path).
+- [ ] **Combined agent generates its own comment on the `recommend` path.** The approve-comment
+  is currently produced from `analysis.ReviewBody` (`orchestrator.go:670`) — output of the
+  tool-less analyser. After Phase 6, the combined agent must author this comment itself. The
+  comment is the product; its quality is the whole point of the redesign.
+- [ ] **Clarify the `confidence` field and low-confidence routing.** `actOnAnalysis` gates on
+  `analysis.Confidence == ConfidenceLow`. With a fully-tooled combined agent, low confidence
+  should be rare because the agent can verify directly. Decide whether the `confidence` field
+  and its routing survive into the combined agent's output schema, or are replaced by a simpler
+  "did the agent reach a verdict?" check.
 
 ### 6.B — Codebase search: agent-driven, not pre-filtered
 
@@ -357,13 +386,23 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 - [ ] **Move codebase search after upstream data ingestion.** The agent reads the changelog first
   to identify *which specific symbols changed*, then searches for those symbols by name. The
   current pre-filtered approach greps by package name before the agent knows what changed.
-- [ ] The `codebase.go` shallow-clone infrastructure may remain as the mechanism that puts the
-  repo on disk efficiently, but the grep step is removed — it is the agent's job.
+- [ ] **Remove `codebase.go` entirely once 6.D lands.** The shallow-clone infrastructure in
+  `codebase.go` existed solely to pre-collect data for the tool-less analyser. After 6.D the
+  Go program prepares a full clone for the agent from the bare clone; there is no use for a
+  separate shallow clone. Remove the whole module, not just the grep step.
+- [ ] **Remove the `codebase.AnalyseCodebaseUsage` call in the orchestrator.** After Phase 3.2,
+  the combined agent owns the clone; the orchestrator must not call
+  `codebase.AnalyseCodebaseUsage` at `processPR` (`orchestrator.go:471`). Remove the call site
+  as part of this item — not just the grep logic inside `codebase.go`.
 
 ### 6.C — Reviewer empowerment
 
-- [ ] **Run the reviewer as a `claude` process in the repo directory**, matching the implementation
-  agent pattern (not a bare `Messages.New` call).
+**Quick win — independent of Phase 3.2.** The reviewer lives in `internal/reviewer/reviewer.go`
+and has no dependency on the analyser-removal cluster. Implement this before or in parallel
+with Phase 3.2.
+
+- [ ] **Run the reviewer as a `claude` subprocess with `proc.Dir` set to the repo directory**,
+  matching the `runWorkerTurn` pattern (not a bare `Messages.New` call).
 - [ ] **Give the reviewer Bash + Read tools** so it can run `git diff bumpTip..HEAD` itself
   (no size cap), read test files directly to verify they weren't weakened, and check coverage.
 - [ ] **Remove the epistemic-hedging patch** from the reviewer prompt ("do not infer the absence
@@ -372,107 +411,146 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 
 ### 6.D — Repo checkout, shared state, and directory lifecycle
 
-The current pipeline does multiple redundant repo operations (a shallow clone in `codebase.go`
-for grepping, a full clone in `implementation.go` for the agent). After Phase 3.2 and 6.A/6.B,
-the combined agent needs the repo for analysis AND implementation. Sequential agents on the same
-PR must not re-clone.
+**Design model:** The Go program owns all infrastructure. Agents own only their designated
+working directory. Agents do not manage git infrastructure, create long-lived directories, or
+clean up after themselves globally — the Go program handles all of that. What can be enforced
+programmatically must be, because code does not forget or disobey.
 
-- [ ] **Sequential agents on the same PR share one checkout.** Clone once (in the implementation
-  pipeline); pass the repo directory to each subsequent stage. Remove the separate shallow clone
-  in `codebase.go`.
+**Bare clone (Go program — permanent, not per-PR):**
+The Go program maintains `sweeper-base/<owner>-<repo>.git`, a bare clone containing the full
+repo history, all branches, and all tags. Fetched at the start of each scan cycle. Never
+modified by agents — agents are told its path and told explicitly not to modify it. It is the
+source used to prepare per-PR clones cheaply without hitting the network.
 
-- [ ] **Concurrent PRs use git worktrees from a shared base clone.** `git worktree add` per PR
-  from a shared base clone avoids redundant network I/O and disk use while keeping PR state
-  isolated. Evaluate whether the existing per-PR worktree model in `implementation.go` already
-  does this or clones fresh each time — if fresh, switch to worktrees.
+**Per-PR working directory and clone (Go program — created and destroyed programmatically):**
+For each PR, the Go program:
+1. Creates `sweeper-data/pr/<owner>-<repo>/pr-<N>/` as the agent's working directory.
+2. Runs `git clone <bare-path> <workdir>/repo` to produce a **full git clone** (not shallow)
+   inside it — the agent's ready-to-use checkout.
+3. Passes both paths to the agent in its brief.
+4. Deletes `<workdir>` when the PR disappears from the open-PR list.
 
-- [ ] **Shared base clone lifecycle.** The base clone is created once and re-fetched at the start
-  of each orchestrator scan cycle (a `git fetch` is fast; a full re-clone is not). It must be
-  cleaned up on process shutdown. It must not be shared across repos — the path must be scoped
-  per-repo (e.g. `sweeper-base/<owner>-<repo>/`).
+Standard brief template for every agent:
+```
+Working directory: <workdir>
+Repo clone:        <workdir>/repo/   [full clone, ready to use]
+Bare clone:        <bare-path>       [do not modify; clone from it if you need a fresh copy]
 
-- [ ] **Per-PR worktree paths must be unique, repo-scoped, and PR-scoped.** Path generation must
-  include both the repo identity and the PR number so two PRs from different repos with the same
-  number don't collide, and so the path communicates its owner (e.g.
-  `sweeper-wt/<owner>-<repo>/pr-<N>/`). Do not rely on `os.MkdirTemp` random suffixes for
-  worktrees that need a stable, predictable path for handoff between sequential agents.
+You have full tool access and are fully autonomous. Work within <workdir> where possible.
+If you must do anything outside it, clean up after yourself. This working directory will
+remain on disk while [the relevant PR] is open.
+```
 
-- [ ] **No accidental directory sharing between agents that should be isolated.** For every
-  directory path in the pipeline, the answer to "which agents may access this path?" must be
-  explicit. Paths that are intended to be isolated must be guaranteed unique by construction —
-  not just "probably unique." Specifically:
-  - Two concurrent PRs must never resolve to the same worktree path, even transiently.
-  - An agent that should not see another PR's state must not be able to reach it via a
-    shared parent directory.
-  - If a path already exists at the start of a run (e.g. from a previous crashed run),
-    the code must detect it, remove it, and start clean — never silently reuse potentially
-    dirty state from a prior run.
+**Impl → reviewer handoff (the clone is the interface):**
+The reviewer is handed the **same `<workdir>`** as the implementing agent. The commit history in
+`<workdir>/repo/` is the handoff — the reviewer reviews what was committed, not a metadata
+summary. The implementing agent is told:
+```
+Your commits will be reviewed — write clean, self-explanatory commit messages. If you
+incorporate review feedback across multiple turns, clean up the commit history (squash or
+fixup as needed) before re-submitting. The reviewer sees exactly the commits in this repo.
+```
+The reviewer's brief includes the branch name and HEAD SHA but does not re-clone; it works in
+`<workdir>/repo/` directly. For re-invocations, the brief must include the turn number so the
+reviewer knows it is reviewing a revision, not a fresh submission.
+
+---
+
+- [ ] **Bare clone lifecycle.** Create `sweeper-base/<owner>-<repo>.git` as a bare clone on
+  first use. Re-fetch (including tags) at the start of each scan cycle, **before any PR
+  goroutines are launched** — the orchestrator dispatches PRs concurrently
+  (`orchestrator.go:244–257`); a fetch racing with active agent processes is a race condition.
+  If `git fetch` fails (disk full, network error, `.git` corruption), delete and do a full
+  re-clone rather than propagating the failure. Scoped per-repo — never shared across repos.
+
+- [ ] **Per-PR working directory and clone.** Go program creates
+  `sweeper-data/pr/<owner>-<repo>/pr-<N>/` and runs `git clone <bare-path> repo` inside it.
+  Both paths included in every agent brief. Canonical schema used consistently throughout
+  codebase and documentation — owner+repo in the path ensures PRs from different repos with
+  the same number never collide.
+
+- [ ] **Stale directory detection.** If `<workdir>` already exists at run start (crash residue),
+  the Go program deletes it and recreates it — never silently reuses potentially dirty state.
+  No branch ref complications: agents work in their own clones and do not add branches to the
+  bare clone.
 
 - [ ] **Agent log files must be PR-scoped, not shared.** Currently all agent logs go to
   `os.TempDir()/sweeper-agent-logs/` with no PR scoping. Multiple concurrent agents interleave
-  logs in the same directory and the files are never cleaned up. Fix: scope logs under the
-  per-PR workdir so they are removed by the existing `Pipeline.cleanup()` call. This closes
-  both the collision problem (logs from different PRs mixed together) and the disk growth
-  problem (logs accumulate indefinitely on a long-running deployment).
+  logs in the same directory and the files are never cleaned up. Fix: write logs under
+  `<workdir>/` so they are removed when the working directory is deleted on PR close. This
+  closes both the collision problem and the disk growth problem.
 
 - [ ] **All per-PR resources live under one PR-keyed root — nothing hidden outside it.**
-  There must be a single directory root per PR (e.g. `sweeper-data/pr/<owner>-<repo>/pr-<N>/`)
-  and *every* resource the pipeline creates for that PR must live under it:
-  - **Log files** (currently `os.TempDir()/sweeper-agent-logs/pr-<N>-agent.jsonl` — outside the
-    workdir, accumulates forever): must be moved under the PR-keyed root.
-  - **Claude CLI session files**: the pipeline pins `--session-id <UUID>` so the claude CLI
-    stores a session transcript on disk (under `~/.claude/projects/<hash>/` by default). These
-    accumulate indefinitely — one per PR — and are not removed by `Pipeline.cleanup()`. Either
-    redirect the claude session storage into the PR-keyed root, or record the session ID in the
-    DB and delete the session files explicitly during the closed-PR sweep.
-  - **Workdir** (the per-PR clone/worktree): this is correctly cleaned up by `defer p.cleanup()`
-    immediately after `Pipeline.Run()` returns. It does not need to outlive the pipeline.
-  - **SQLite DB rows** (`pr_progress`, `created_prs`): not a filesystem resource but still
-    resource creep. The existing `Reap()` mechanism must be triggered by the closed-PR sweep
-    rather than running on a separate schedule, so the DB stays in sync with what the open-PR
-    list actually contains.
+  Every resource the Go program creates for a PR must live under
+  `sweeper-data/pr/<owner>-<repo>/pr-<N>/`:
+  - **Repo clone** (`<workdir>/repo/`): lives inside the working directory. ✓
+  - **Log files**: moved under `<workdir>/` (see above).
+  - **Claude CLI session files**: the pipeline pins `--session-id <UUID>`; the CLI stores
+    session transcripts under `~/.claude/projects/<hash>/` by default — not under `<workdir>`.
+    These accumulate indefinitely. **Prerequisite:** investigate the Claude CLI session storage
+    format before committing to a cleanup mechanism. The path uses a hash of the project
+    context, not the session ID; finding files by session ID may require shell investigation.
+    Either redirect storage into `<workdir>`, or record the session ID in the DB and delete
+    files explicitly during the closed-PR sweep.
+  - **Remote git branches** pushed to GitHub (e.g. `auto/fix/<package>-<version>`): not deleted
+    by the closed-PR sweep. Decide whether remote branch cleanup is in scope for Phase 6 or
+    documented as a known out-of-scope resource.
+  - **SQLite DB rows** (`pr_progress`, `created_prs`): `Reap()` must be triggered by the
+    closed-PR sweep so the DB stays in sync with the open-PR list.
 
 - [ ] **PR-keyed assets are cleaned up when the PR is closed — one trigger, complete cleanup.**
-  On every orchestrator scan cycle, after fetching the current open-PR list, sweep the PR-keyed
-  root directory and delete any subdirectory whose PR number is absent from that list. A PR
-  disappears from the list when it is merged, closed as stale, or finalized — the correct signal
-  that it will never appear in the UI again. The same sweep triggers `Reap()` for the DB rows.
-  No other trigger (time-based expiry, manual sweep) is needed; the open-PR scan is sufficient.
-  **The invariant: deleting `sweeper-data/pr/<owner>-<repo>/pr-<N>/` plus calling `Reap(N)`
-  must leave zero resources associated with PR N on the host.**
+  On every orchestrator scan cycle, after fetching the open-PR list, the Go program sweeps
+  `sweeper-data/pr/<owner>-<repo>/` and deletes any `pr-<N>/` directory whose PR is absent
+  from the list. The same sweep triggers `Reap()` for DB rows.
+  **Invariant: deleting `sweeper-data/pr/<owner>-<repo>/pr-<N>/` plus calling `Reap(N)`
+  leaves zero resources associated with PR N on the host.**
+  **Caveat — GaveUp path:** `GaveUp` does not close the original dependabot PR (only the
+  success path closes it). A GaveUp PR stays in the open-PR list; its working directory is
+  not deleted until the PR is manually closed or merged. Known gap — document it.
 
-- [ ] **Same-package collision is prevented by the staleness gate, not by worktree isolation.**
-  `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the implementation
-  pipeline, so only the higher-version PR proceeds. Document this explicitly so future changes
-  don't accidentally move or remove the staleness check and unknowingly rely on worktree
-  isolation as the only guard. Worktree isolation is the backstop, not the primary defence.
+- [ ] **Update the web dashboard's log-serving endpoint.** Moving logs under the PR-keyed root
+  requires updating the web API. The web process uses `--log-dir` / `SWEEPER_LOG_DIR`
+  (`implementation.go:316`) to serve the agent-log endpoint. Update it to construct the new
+  per-PR log path from the canonical schema.
 
-- [ ] **Explicit state handoff in every agent brief.** When sequential agents share a repo, each
-  brief must state:
-  - Branch name and HEAD SHA + commit message at handoff
-  - Whether the working tree is clean or has uncommitted changes (and why)
-  - Which prior agent left the current state
-  - What this agent is expected to find and what it must leave
-  An agent that finds unexpected local changes without this context cannot reason about them
-  correctly — it may discard work, preserve noise, or be confused by state it didn't create.
-  Template (include in each handoff brief):
+- [ ] **Resolve `manualRebase` sequencing vs PR-keyed root.** `manualRebase` creates its own
+  `os.MkdirTemp("", "sweeper-rebase-*")` with `defer os.RemoveAll` and runs *before*
+  `p.workdir` is created (`implementation.go:415–433`). Either create the PR-keyed root before
+  calling `manualRebase` (so the rebase can use a subdirectory of it), or keep the rebase temp
+  dir as a documented short-lived exception outside the PR root.
+
+- [ ] **Same-package collision is prevented by the staleness gate, not by directory isolation.**
+  `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the pipeline, so
+  only the higher-version PR proceeds. Document this explicitly — directory isolation is the
+  backstop, not the primary defence.
+
+- [ ] **Impl → reviewer brief.** The reviewer is handed the same `<workdir>` as the implementing
+  agent. Its brief must include:
   ```
-  Repo state at handoff:
-    Branch:   <name>
-    HEAD:     <sha> ("<commit message>")
-    Worktree: clean | <N uncommitted files — reason>
-    Left by:  <prior agent role>
-    Expected: <what this agent should find and what it must leave>
+  Working directory: <workdir>
+  Repo clone:        <workdir>/repo/
+  Branch:            <name>
+  HEAD:              <sha> ("<commit message>")
+  Turn:              <N>  (1 = first review; 2+ = reviewing revised implementation)
   ```
+  The reviewer works directly in `<workdir>/repo/` — no re-clone needed.
 
 ### 6.E — Agent prompts: role, purpose, and workflow context
 
-Every agent prompt must be reviewed against the Agent Empowerment Principle in `docs/PRINCIPLES.md`:
+Every agent prompt must be reviewed against the Agent Empowerment Principle in `docs/PRINCIPLES.md`.
+Two concrete changes are already known from the audit — these must land as part of this item:
 
+- [ ] **Remove the dead-letter "follow the compare URL" instruction** from `analyser.go:46–47`.
+  This instruction cannot be followed because the analyser has no fetch tool. After Phase 6 the
+  combined agent has WebFetch — rewrite the instruction as "use your WebFetch tool to fetch the
+  compare URL and migration guide if the pre-fetched data is insufficient."
+- [ ] **Remove the epistemic-hedging patch** from `reviewer.go:187–194` ("Do NOT infer the absence
+  of any change from this cut-off view; if the visible portion is insufficient to judge, say so").
+  After 6.C, the reviewer has Bash access and can run `git diff` itself. Remove the hedge and
+  replace with: "Use `git diff` to read the full diff; there is no size cap."
 - [ ] Each prompt explains the agent's role, *why* that role exists, and how it fits the overall
   workflow (the context helps the agent reason about edge cases it wasn't explicitly instructed on).
-- [ ] No prompt contains instructions the agent structurally cannot follow (e.g. "fetch the compare
-  URL" without a fetch tool).
+- [ ] No prompt contains instructions the agent structurally cannot follow.
 - [ ] No prompt substitutes epistemic hedging for actual tool access.
 
 ### 6.F — Regression test (mdi-react)
@@ -482,12 +560,20 @@ This is the end-to-end verification that the principles fixed the problem, not j
 - [ ] Phase 6.A–6.E implemented and deployed (`e2` — GCP deploy).
 - [ ] Fork resynced (`e1`) — the mdi-react bump (`petemoore/taskcluster` mirror of
   upstream `taskcluster/taskcluster#6753`) is present as a fork PR.
-- [ ] Watch the PR processed. Verify:
-  - The agent fetches the upstream MDI icon rename list for the 6.7.0→9.4.0 range
-  - The agent searches the codebase for the specific renamed icon names
+- [ ] If upstream `taskcluster/taskcluster#6753` is no longer reproducible in the fork at test
+  time, create a synthetic mdi-react bump PR at the same version range as the test vehicle.
+- [ ] Watch the PR processed. Verify using the agent log (`pr-<N>-agent.jsonl`):
+  - A `tool_use` event of type `WebFetch` appears with a URL pointing to the MDI changelog,
+    GitHub releases, or npm registry for mdi-react in the 6.7.0→9.4.0 range — not just
+    the package homepage
+  - A Bash `tool_use` event appears searching for specific icon names (e.g.
+    `grep -r 'ClockIcon'`), not just the package name
   - The output contains verified facts ("icon `X` was renamed to `Y`; the codebase uses
-    `X` in `path/to/file.tsx` — this must be updated") or a verified absence ("none of the
-    renamed icons are used in this codebase")
+    `X` in `path/to/file.tsx` — this must be updated") or a verified absence grounded in a
+    specific search result ("grep found no matches for `X`"), not absence of evidence in a
+    pre-filtered list
+  - The comment cites a specific source (URL or release notes section) for the icon rename
+    information
   - No "unlikely", "probably", or "common/well-established" language in the output
   - The recommendation is grounded in what was actually checked, not estimated
 

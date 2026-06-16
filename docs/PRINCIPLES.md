@@ -68,6 +68,14 @@ These hold for every code change, agent prompt, and GitHub interaction.
    — decides when CI is acceptable, and an independent reviewer checks the work on the fix path.
    Complex upgrades take multiple turns; nothing is one-shot.
 
+   **Infrastructure is the program's job, not the agent's.** The Go program creates working
+   directories, prepares git clones, manages the bare clone, and cleans up on PR close. Agents are
+   not asked to do any of this — code does not forget instructions or make mistakes the way an
+   agent might. The rule: *if something can be enforced or performed programmatically, it must be*.
+   Agents are autonomous over their domain (reasoning, research, implementation) but do not manage
+   their own lifecycle. This is the complement to the agent empowerment principle: agents get full
+   tool access and autonomy over their work; the program handles the environment they work in.
+
 ## Agent empowerment principle
 
 **This is the most important design constraint for any agent prompt, pipeline stage, or
@@ -107,6 +115,14 @@ component cannot know exactly what the agent will need; the agent, given autonom
   independent review agents must still validate work. The distinction is: gates enforce *outcomes*
   (did CI pass? did the reviewer approve?), not *inputs* (what information did we decide to give
   the agent). Don't try to govern quality by restricting information.
+
+- **Autonomy over domain; infrastructure from the program.** Agent empowerment is about giving
+  agents what they need to do their *reasoning and implementation* work — not about agents
+  managing their own environment. Directory creation, clone preparation, and cleanup on PR close
+  are performed by the Go program, not delegated to agents. When an agent needs a checked-out
+  repo, the program prepares one and tells the agent where to find it. The agent is free to
+  re-clone if it needs to, but it should never be *responsible* for infrastructure that the
+  program can manage more reliably.
 
 - **Unverified claims are a design smell, not a prompt problem.** If an agent is saying "this is
   unlikely" instead of checking, the fix is not to add "flag your guesses" to the prompt. The fix

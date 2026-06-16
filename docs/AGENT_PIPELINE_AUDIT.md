@@ -280,11 +280,17 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
   residue), it is removed and recreated — never silently reused as potentially dirty state
 - [ ] Agent log files are scoped under the per-PR workdir, not under a shared
   `os.TempDir()/sweeper-agent-logs/`; they are removed by `Pipeline.cleanup()`
-- [ ] PR-keyed assets (logs and anything else that outlives `Pipeline.Run()`) are stored under
-  a stable PR-keyed path (e.g. `sweeper-data/pr-logs/<owner>-<repo>/pr-<N>/`)
-- [ ] On each orchestrator scan cycle, after fetching the open-PR list, any PR-keyed asset
-  directory whose PR is absent from the list is deleted — this is the cleanup trigger (merged,
-  closed stale, or finalized PRs disappear from the open list and will never reappear in the UI)
+- [ ] ALL per-PR resources live under one PR-keyed root (e.g.
+  `sweeper-data/pr/<owner>-<repo>/pr-<N>/`); nothing is hidden outside it:
+  - Log files moved under the PR-keyed root (not under `os.TempDir()/sweeper-agent-logs/`)
+  - Claude CLI session files either redirected into the PR-keyed root or explicitly deleted
+    by the closed-PR sweep using the sessionID stored in the DB
+  - Workdir already cleaned up by `defer Pipeline.cleanup()` immediately after `Pipeline.Run()`
+  - SQLite DB rows pruned by `Reap()` triggered from the closed-PR sweep
+- [ ] Invariant: deleting `sweeper-data/pr/<owner>-<repo>/pr-<N>/` plus calling `Reap(N)` leaves
+  zero resources associated with PR N on the host
+- [ ] On each orchestrator scan cycle, after fetching the open-PR list, any PR-keyed root
+  directory whose PR is absent from the list is deleted and `Reap()` called for that PR number
 - [ ] No time-based expiry or manual sweep is needed; the open-PR scan is the sole cleanup signal
 - [ ] The staleness gate (`FindNewerPRForPackage` in Step 1) is documented as the primary guard
   against same-package parallel processing; worktree isolation is the backstop, not the

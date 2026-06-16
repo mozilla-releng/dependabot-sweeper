@@ -415,17 +415,31 @@ PR must not re-clone.
   both the collision problem (logs from different PRs mixed together) and the disk growth
   problem (logs accumulate indefinitely on a long-running deployment).
 
-- [ ] **PR-keyed assets are cleaned up when the PR is closed — no indefinite growth.** Workdirs
-  (the per-PR clone/worktree) don't need to survive past `Pipeline.Run()` — `defer p.cleanup()`
-  already handles this correctly. Log files and any other assets that need to outlive the pipeline
-  run (e.g. for display in the web UI) must be stored under a stable, PR-keyed path (e.g.
-  `sweeper-data/pr-logs/<owner>-<repo>/pr-<N>/`). On every orchestrator scan cycle, after
-  fetching the current open-PR list, the orchestrator must sweep the asset store and delete any
-  PR-keyed directory whose PR number is absent from the open list. A PR disappears from the open
-  list when it is merged, closed as stale, or finalized — which is the correct signal that it
-  will never appear in the UI again and its assets can be removed. This is the only resource
-  lifecycle policy needed; no other trigger (time-based expiry, manual sweep, etc.) is required.
-  The existing open-PR scan is the cleanup signal — no extra API calls needed.
+- [ ] **All per-PR resources live under one PR-keyed root — nothing hidden outside it.**
+  There must be a single directory root per PR (e.g. `sweeper-data/pr/<owner>-<repo>/pr-<N>/`)
+  and *every* resource the pipeline creates for that PR must live under it:
+  - **Log files** (currently `os.TempDir()/sweeper-agent-logs/pr-<N>-agent.jsonl` — outside the
+    workdir, accumulates forever): must be moved under the PR-keyed root.
+  - **Claude CLI session files**: the pipeline pins `--session-id <UUID>` so the claude CLI
+    stores a session transcript on disk (under `~/.claude/projects/<hash>/` by default). These
+    accumulate indefinitely — one per PR — and are not removed by `Pipeline.cleanup()`. Either
+    redirect the claude session storage into the PR-keyed root, or record the session ID in the
+    DB and delete the session files explicitly during the closed-PR sweep.
+  - **Workdir** (the per-PR clone/worktree): this is correctly cleaned up by `defer p.cleanup()`
+    immediately after `Pipeline.Run()` returns. It does not need to outlive the pipeline.
+  - **SQLite DB rows** (`pr_progress`, `created_prs`): not a filesystem resource but still
+    resource creep. The existing `Reap()` mechanism must be triggered by the closed-PR sweep
+    rather than running on a separate schedule, so the DB stays in sync with what the open-PR
+    list actually contains.
+
+- [ ] **PR-keyed assets are cleaned up when the PR is closed — one trigger, complete cleanup.**
+  On every orchestrator scan cycle, after fetching the current open-PR list, sweep the PR-keyed
+  root directory and delete any subdirectory whose PR number is absent from that list. A PR
+  disappears from the list when it is merged, closed as stale, or finalized — the correct signal
+  that it will never appear in the UI again. The same sweep triggers `Reap()` for the DB rows.
+  No other trigger (time-based expiry, manual sweep) is needed; the open-PR scan is sufficient.
+  **The invariant: deleting `sweeper-data/pr/<owner>-<repo>/pr-<N>/` plus calling `Reap(N)`
+  must leave zero resources associated with PR N on the host.**
 
 - [ ] **Same-package collision is prevented by the staleness gate, not by worktree isolation.**
   `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the implementation

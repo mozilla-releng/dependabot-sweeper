@@ -1221,10 +1221,25 @@ func (o *Orchestrator) handlePipelineResult(ctx context.Context, pr models.Depen
 	}
 
 	// Pipeline failed.
-	var fb strings.Builder
+	if hasReplacement {
+		if err := o.github.ClosePRWithComment(ctx, replacementNumber,
+			fmt.Sprintf("Closing — automated implementation did not complete successfully.\n\n%s", result.Detail)); err != nil {
+			slog.Warn("failed to close rogue replacement PR", "pr", replacementNumber, "error", err)
+		}
+	}
+
 	if result.GaveUp {
-		fmt.Fprintf(&fb, "%s\n\n_Automated review._", result.Detail)
+		// Q3: silent draft — no comment posted to the original dependabot PR.
+		// The replacement stays a draft; no noise to maintainers. Record the
+		// terminal outcome so the next cycle's SHA-skip fires and does not
+		// re-enter the agentic pipeline (cost-safety invariant).
+		giveUpSHA := terminalSHA(result.TipSHA, pr.HeadSHA)
+		slog.Info("Pipeline gave up — recording silent gave_up outcome (no comment posted)",
+			"pr", pr.Number, "detail", result.Detail)
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageGaveUp, result.Detail)
+		o.recordOutcome(pr.Number, giveUpSHA, models.StageGaveUp)
 	} else {
+		var fb strings.Builder
 		fmt.Fprintf(&fb, "Automated implementation attempted but did not complete.\n\n**Reason:** %s\n\n", result.Detail)
 		if result.ReviewVerdict != nil && len(result.ReviewVerdict.Concerns) > 0 {
 			fb.WriteString("**Review concerns:**\n")
@@ -1237,23 +1252,6 @@ func (o *Orchestrator) handlePipelineResult(ctx context.Context, pr models.Depen
 			fmt.Fprintf(&fb, "Branch `%s` contains the partial work.\n\n", result.Branch)
 		}
 		fb.WriteString("_Automated review._")
-	}
-
-	if hasReplacement {
-		if err := o.github.ClosePRWithComment(ctx, replacementNumber,
-			fmt.Sprintf("Closing — automated implementation did not complete successfully.\n\n%s", result.Detail)); err != nil {
-			slog.Warn("failed to close rogue replacement PR", "pr", replacementNumber, "error", err)
-		}
-	}
-
-	if result.GaveUp {
-		giveUpSHA := terminalSHA(result.TipSHA, pr.HeadSHA)
-		if err := o.github.UpsertStatusComment(ctx, pr.Number, giveUpSHA, fb.String()); err != nil {
-			slog.Warn("failed to upsert give-up comment", "pr", pr.Number, "error", err)
-		}
-		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageGaveUp, result.Detail)
-		o.recordOutcome(pr.Number, giveUpSHA, models.StageGaveUp)
-	} else {
 		if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, fb.String()); err != nil {
 			slog.Warn("failed to upsert failure comment", "pr", pr.Number, "error", err)
 		}

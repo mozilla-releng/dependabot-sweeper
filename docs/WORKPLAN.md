@@ -7,15 +7,11 @@ the commit/PR.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a maintainer decision first.
 
-> **Status (2026-06-16): PRs #1–#6 are MERGED into `main`** — Phase 0 (validated), Phase 1 (#1),
-> Phase 2 (#2), and the independent Phase-3 items Q12 (#3), Q5/Q6 (#4), Q7 (#5), Q14 (#6). Phase 5
-> docs are complete (two-PR-type lifecycle section added to ALGORITHM.md). `main` is green
-> (build/test/gofmt/staticcheck).
->
-> **The Phase 3.2 analyser-removal cluster is code-complete** on branch
-> `rework/phase3-2-cluster` (f84f711 spec.go / dc84af8 combined agent+guard / 57bd970
-> orchestrator wiring / dad881b Q13 curate / f5e0cdb Q15 justification). Build + unit tests pass;
-> **e2e verification against the live test bed is pending** before merging to main.
+> **Status (2026-06-16): Phase 3.2 cluster MERGED to `main`** — combined agent, Q8 guard,
+> Q3 silent-draft, Q13 curate, Q15 justification, Phase 6 quick wins (6.A/6.C/6.D/6.E),
+> and Phase 6.B (codebase.go removed) are all on `main`. Build/test/staticcheck green.
+> **E2e verification against the live test bed is still pending** (required before claiming
+> Phase 3.2 fully done per WORKPLAN). Phase 6.F (mdi-react regression test) is next.
 >
 > Still open: **Phase 4** (UI, needs a browser session). See `docs/questions.md` for the two
 > maintainer decisions.

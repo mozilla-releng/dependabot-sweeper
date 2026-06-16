@@ -280,6 +280,12 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
   residue), it is removed and recreated — never silently reused as potentially dirty state
 - [ ] Agent log files are scoped under the per-PR workdir, not under a shared
   `os.TempDir()/sweeper-agent-logs/`; they are removed by `Pipeline.cleanup()`
+- [ ] PR-keyed assets (logs and anything else that outlives `Pipeline.Run()`) are stored under
+  a stable PR-keyed path (e.g. `sweeper-data/pr-logs/<owner>-<repo>/pr-<N>/`)
+- [ ] On each orchestrator scan cycle, after fetching the open-PR list, any PR-keyed asset
+  directory whose PR is absent from the list is deleted — this is the cleanup trigger (merged,
+  closed stale, or finalized PRs disappear from the open list and will never reappear in the UI)
+- [ ] No time-based expiry or manual sweep is needed; the open-PR scan is the sole cleanup signal
 - [ ] The staleness gate (`FindNewerPRForPackage` in Step 1) is documented as the primary guard
   against same-package parallel processing; worktree isolation is the backstop, not the
   primary defence; a comment or test pins this ordering assumption

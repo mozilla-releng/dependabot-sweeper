@@ -415,6 +415,18 @@ PR must not re-clone.
   both the collision problem (logs from different PRs mixed together) and the disk growth
   problem (logs accumulate indefinitely on a long-running deployment).
 
+- [ ] **PR-keyed assets are cleaned up when the PR is closed — no indefinite growth.** Workdirs
+  (the per-PR clone/worktree) don't need to survive past `Pipeline.Run()` — `defer p.cleanup()`
+  already handles this correctly. Log files and any other assets that need to outlive the pipeline
+  run (e.g. for display in the web UI) must be stored under a stable, PR-keyed path (e.g.
+  `sweeper-data/pr-logs/<owner>-<repo>/pr-<N>/`). On every orchestrator scan cycle, after
+  fetching the current open-PR list, the orchestrator must sweep the asset store and delete any
+  PR-keyed directory whose PR number is absent from the open list. A PR disappears from the open
+  list when it is merged, closed as stale, or finalized — which is the correct signal that it
+  will never appear in the UI again and its assets can be removed. This is the only resource
+  lifecycle policy needed; no other trigger (time-based expiry, manual sweep, etc.) is required.
+  The existing open-PR scan is the cleanup signal — no extra API calls needed.
+
 - [ ] **Same-package collision is prevented by the staleness gate, not by worktree isolation.**
   `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the implementation
   pipeline, so only the higher-version PR proceeds. Document this explicitly so future changes

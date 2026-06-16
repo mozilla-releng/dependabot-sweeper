@@ -14,7 +14,6 @@ import (
 
 	"github.com/mozilla-releng/dependabot-sweeper/internal/agent"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/analyser"
-	"github.com/mozilla-releng/dependabot-sweeper/internal/codebase"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/config"
 	ghclient "github.com/mozilla-releng/dependabot-sweeper/internal/github"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/implementation"
@@ -552,26 +551,27 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	return o.runCombinedAgent(ctx, pr)
 }
 
-// runLegacyAnalyser is the pre-Q10 path: pre-fetch upstream data + codebase usage,
-// call the tool-less analyser, route on its recommendation. Kept behind
+// runLegacyAnalyser is the pre-Q10 path: pre-fetch upstream data, call the
+// tool-less analyser, route on its recommendation. Kept behind
 // --legacy-analyser for rollback. New code should use runCombinedAgent.
+//
+// codebase.AnalyseCodebaseUsage was removed (Phase 6.B): codebase.go existed
+// solely to pre-collect data for the tool-less analyser and is now deleted.
+// The combined agent path has full tool access and searches the codebase
+// autonomously. The legacy path passes empty CodebaseUsage to the analyser
+// (the analyser handles this gracefully — it notes no usage was found).
 func (o *Orchestrator) runLegacyAnalyser(ctx context.Context, pr models.DependabotPR) models.ReviewResult {
-	// Steps 4-5: per-package upstream info + codebase usage. These don't apply
-	// to a grouped update (no single package), so skip them for groups — the
-	// analyser works off the combined diff and the member list instead.
+	// Step 4: per-package upstream info. Does not apply to grouped updates
+	// (no single package); the analyser works off the combined diff instead.
 	var upstream models.UpstreamInfo
-	var usage models.CodebaseUsage
 	if !pr.Grouped {
 		slog.Info("Fetching upstream info", "pr", pr.Number)
 		upstream = o.github.GetUpstreamInfo(ctx, pr.PackageName, pr.Ecosystem, pr.OldVersion, pr.NewVersion)
-
-		slog.Info("Analysing codebase usage", "pr", pr.Number)
-		u, uerr := codebase.AnalyseCodebaseUsage(ctx, o.repo, pr.PackageName, pr.Ecosystem, "")
-		if uerr != nil {
-			slog.Warn("Codebase analysis failed", "pr", pr.Number, "error", uerr)
-		}
-		usage = u
 	}
+	// Codebase usage: always empty on the legacy path. codebase.go was removed
+	// in Phase 6.B — see comment above. The combined agent path (runCombinedAgent)
+	// is autonomous and does not use this field at all.
+	var usage models.CodebaseUsage
 
 	// Step 6: Fetch failing-CI logs (best-effort).
 	var failureLogs map[string]string

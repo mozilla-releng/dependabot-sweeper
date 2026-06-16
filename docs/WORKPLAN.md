@@ -317,6 +317,119 @@ The centrepiece is the fix-first rework; the rest support it.
 
 ---
 
+---
+
+## Phase 6 — Agent pipeline empowerment redesign
+
+**Prerequisite:** Phase 3.2 cluster (single combined agent) should land first or alongside.
+Phase 6 builds on the single-agent model; designing empowered information gathering into a
+two-agent (analyser + implementer) architecture wastes effort since Phase 3.2 removes that split.
+
+**Audit reference:** `docs/AGENT_PIPELINE_AUDIT.md` — read this before implementing any item
+below. It contains the full findings, the concrete failure scenarios, and the post-implementation
+verification checklist that must be used to confirm every gap was closed.
+
+**Regression test (mandatory, final step):** After all Phase 6 items are done and deployed,
+process the mdi-react 6.7.0→9.4.0 bump (upstream `taskcluster/taskcluster#6753`, fork
+`petemoore/taskcluster`). Rebuild image (`e2`), resync fork (`e1`), watch the PR processed by
+the redesigned agent. The output must show verified facts about icon renames — not estimates.
+See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
+
+### 6.A — Combined agent: tools and autonomous information gathering
+
+- [ ] **Give the combined agent WebFetch tools** so it can follow compare URLs, fetch migration
+  guides, and read full changelogs when the pre-fetched summary is insufficient or truncated.
+- [ ] **Give the combined agent Bash + Read tools in a checked-out repo** (the implementation
+  agent already has this — the combined agent must inherit it, not regress to the tool-less
+  analyser model).
+- [ ] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
+  URL if the changelog is truncated" — replace it with actual tool access to do so.
+- [ ] **Reframe pre-fetched upstream data as a hint, not the ceiling.** The orchestrator may still
+  pre-fetch release data for performance (saves the agent a round-trip on the happy path), but
+  the agent brief must make clear: "this is what we found quickly; if it is insufficient, fetch
+  more."
+
+### 6.B — Codebase search: agent-driven, not pre-filtered
+
+- [ ] **Remove the 50-snippet cap as a ceiling.** The agent must be able to search the codebase
+  for specific symbol names — not receive a package-name grep capped at 50 lines.
+- [ ] **Remove the fixed file-extension list as a gate.** The agent decides what to search.
+- [ ] **Move codebase search after upstream data ingestion.** The agent reads the changelog first
+  to identify *which specific symbols changed*, then searches for those symbols by name. The
+  current pre-filtered approach greps by package name before the agent knows what changed.
+- [ ] The `codebase.go` shallow-clone infrastructure may remain as the mechanism that puts the
+  repo on disk efficiently, but the grep step is removed — it is the agent's job.
+
+### 6.C — Reviewer empowerment
+
+- [ ] **Run the reviewer as a `claude` process in the repo directory**, matching the implementation
+  agent pattern (not a bare `Messages.New` call).
+- [ ] **Give the reviewer Bash + Read tools** so it can run `git diff bumpTip..HEAD` itself
+  (no size cap), read test files directly to verify they weren't weakened, and check coverage.
+- [ ] **Remove the epistemic-hedging patch** from the reviewer prompt ("do not infer the absence
+  of changes from the cut-off view") — this is the wrong fix. With tool access the reviewer
+  can check directly.
+
+### 6.D — Repo checkout and shared state
+
+The current pipeline does multiple redundant repo operations (a shallow clone in `codebase.go`
+for grepping, a full clone in `implementation.go` for the agent). After Phase 3.2 and 6.A/6.B,
+the combined agent needs the repo for analysis AND implementation. Sequential agents on the same
+PR must not re-clone.
+
+- [ ] **Sequential agents on the same PR share one checkout.** Clone once (in the implementation
+  pipeline); pass the repo directory to each subsequent stage. Remove the separate shallow clone
+  in `codebase.go`.
+- [ ] **Concurrent PRs use git worktrees from a shared base clone.** `git worktree add` per PR
+  from a shared base clone avoids redundant network I/O and disk use while keeping PR state
+  isolated. Evaluate whether the existing per-PR worktree model in `implementation.go` already
+  does this or clones fresh each time — if fresh, switch to worktrees.
+- [ ] **Explicit state handoff in every agent brief.** When sequential agents share a repo, each
+  brief must state:
+  - Branch name and HEAD SHA + commit message at handoff
+  - Whether the working tree is clean or has uncommitted changes (and why)
+  - Which prior agent left the current state
+  - What this agent is expected to find and what it must leave
+  An agent that finds unexpected local changes without this context cannot reason about them
+  correctly — it may discard work, preserve noise, or be confused by state it didn't create.
+  Template (include in each handoff brief):
+  ```
+  Repo state at handoff:
+    Branch:   <name>
+    HEAD:     <sha> ("<commit message>")
+    Worktree: clean | <N uncommitted files — reason>
+    Left by:  <prior agent role>
+    Expected: <what this agent should find and what it must leave>
+  ```
+
+### 6.E — Agent prompts: role, purpose, and workflow context
+
+Every agent prompt must be reviewed against the Agent Empowerment Principle in `docs/PRINCIPLES.md`:
+
+- [ ] Each prompt explains the agent's role, *why* that role exists, and how it fits the overall
+  workflow (the context helps the agent reason about edge cases it wasn't explicitly instructed on).
+- [ ] No prompt contains instructions the agent structurally cannot follow (e.g. "fetch the compare
+  URL" without a fetch tool).
+- [ ] No prompt substitutes epistemic hedging for actual tool access.
+
+### 6.F — Regression test (mdi-react)
+
+This is the end-to-end verification that the principles fixed the problem, not just the design.
+
+- [ ] Phase 6.A–6.E implemented and deployed (`e2` — GCP deploy).
+- [ ] Fork resynced (`e1`) — the mdi-react bump (`petemoore/taskcluster` mirror of
+  upstream `taskcluster/taskcluster#6753`) is present as a fork PR.
+- [ ] Watch the PR processed. Verify:
+  - The agent fetches the upstream MDI icon rename list for the 6.7.0→9.4.0 range
+  - The agent searches the codebase for the specific renamed icon names
+  - The output contains verified facts ("icon `X` was renamed to `Y`; the codebase uses
+    `X` in `path/to/file.tsx` — this must be updated") or a verified absence ("none of the
+    renamed icons are used in this codebase")
+  - No "unlikely", "probably", or "common/well-established" language in the output
+  - The recommendation is grounded in what was actually checked, not estimated
+
+---
+
 ## UI / dashboard (tracked in backlog memory too)
 
 - [ ] **Link the sidebar PR number to the actual GitHub PR.** `models.DependabotPR.URL` exists but

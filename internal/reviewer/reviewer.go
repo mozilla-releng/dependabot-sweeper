@@ -144,7 +144,7 @@ func (r *Reviewer) runSubprocess(ctx context.Context, repoDir, brief string) (*m
 
 	args := []string{
 		"claude", "--print", "--dangerously-skip-permissions",
-		"--output-format", "stream-json", "--verbose",
+		"--output-format", "text",
 		"--max-budget-usd", fmt.Sprintf("%.2f", r.budget),
 	}
 	if r.model != "" {
@@ -187,9 +187,8 @@ func (r *Reviewer) runSubprocess(ctx context.Context, repoDir, brief string) (*m
 
 	slog.Debug("reviewer subprocess output", "len", len(rawOutput))
 
-	// The subprocess emits stream-json events. The JSON verdict is somewhere in
-	// the output — typically in a "result" event's text or in an assistant turn.
-	// Extract the first JSON object that contains a "verdict" field.
+	// The subprocess emits plain text (--output-format text). Extract the JSON
+	// verdict object from the assistant's prose response.
 	verdict, err := r.ParseResponse(rawOutput)
 	if err != nil {
 		return nil, err
@@ -241,12 +240,8 @@ func (r *Reviewer) BuildBrief(
 	)
 }
 
-// ParseResponse extracts a ReviewVerdict from the reviewer's raw output.
-// It searches the stream-json output for the JSON verdict object.
+// ParseResponse extracts a ReviewVerdict from the reviewer's raw text output.
 func (r *Reviewer) ParseResponse(rawOutput string) (*models.ReviewVerdict, error) {
-	// Search for a JSON object containing a "verdict" field in the output.
-	// The stream-json output may contain many JSON lines; we look for text
-	// content that has the verdict structure.
 	text := llmutil.ExtractJSON(rawOutput)
 
 	var data struct {

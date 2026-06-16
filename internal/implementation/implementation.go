@@ -1199,25 +1199,6 @@ func (p *Pipeline) verifyCI(ctx context.Context, branch string, ignored map[stri
 	return last, false
 }
 
-// getBranchDiff returns the agent's net change as a diff against baseSHA (the
-// captured post-rebase bump tip), i.e. baseSHA...HEAD. baseSHA is a concrete
-// commit, not a ref name, so it is stable across the worker's force-pushes —
-// unlike the old origin/<HeadRef>, which is mis-based and goes empty/wrong once
-// the branch is force-pushed (M4 / MINOR-1).
-func (p *Pipeline) getBranchDiff(ctx context.Context, repoDir, baseSHA string) string {
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", "-C", repoDir, "diff", fmt.Sprintf("%s...HEAD", baseSHA)).Output()
-	if err != nil {
-		return ""
-	}
-	s := string(out)
-	if len(s) > 100_000 {
-		s = s[:100_000]
-	}
-	return s
-}
-
 // getBranchCommits lists the agent's commits on top of baseSHA (the captured
 // post-rebase bump tip), baseSHA..HEAD, surfaced to the reviewer.
 func (p *Pipeline) getBranchCommits(ctx context.Context, repoDir, baseSHA string) []models.CommitInfo {

@@ -67,3 +67,61 @@ These hold for every code change, agent prompt, and GitHub interaction.
    lifecycle; the agentic worker iterates with persistent context. The orchestrator — not the agent
    — decides when CI is acceptable, and an independent reviewer checks the work on the fix path.
    Complex upgrades take multiple turns; nothing is one-shot.
+
+## Agent empowerment principle
+
+**This is the most important design constraint for any agent prompt, pipeline stage, or
+information-gathering step.** Violating it is the root cause of guesswork, false confidence,
+and unnecessary human escalation.
+
+### The rule
+
+**Give agents the tools, context, and autonomy to collect the information they need. Do not
+pre-filter information on an agent's behalf and pass in a summary.**
+
+An agent that is told its role, given the full relevant context of the system it operates in, and
+equipped with tools to independently gather what it needs will always outperform one that receives
+a curated, pre-filtered subset of information assembled by an upstream component. The upstream
+component cannot know exactly what the agent will need; the agent, given autonomy, can.
+
+### What this means in practice
+
+- **Agents must receive their role and its purpose.** Every agent prompt must explain what this
+  agent does, *why* that role exists, and how it fits into the overall workflow. An agent that
+  understands the concerns of the people and systems it interacts with will reason better about
+  edge cases.
+
+- **Agents must have tools to gather information, not just receive it.** If an agent needs to
+  verify that icon names haven't changed, it must be able to fetch the upstream rename history
+  itself — not receive a summary that was assembled upstream and may be incomplete. If it needs to
+  search the codebase, it must be able to run that search, not receive a capped snippet list that
+  may have missed the critical usage.
+
+- **Never reason on behalf of an agent about what it might need.** The pattern of "collect X
+  because the agent will probably want X" is always worse than "give the agent access to X and let
+  it decide." Pre-filtering creates manufactured uncertainty: the agent is forced to reason under
+  information constraints that don't reflect the actual problem.
+
+- **Programmatic gates and independent reviews are still essential.** Empowering agents does not
+  mean removing oversight. The orchestrator must still enforce CI gates programmatically, and
+  independent review agents must still validate work. The distinction is: gates enforce *outcomes*
+  (did CI pass? did the reviewer approve?), not *inputs* (what information did we decide to give
+  the agent). Don't try to govern quality by restricting information.
+
+- **Unverified claims are a design smell, not a prompt problem.** If an agent is saying "this is
+  unlikely" instead of checking, the fix is not to add "flag your guesses" to the prompt. The fix
+  is to give the agent the means to check. Patching prompts to require epistemic hedging turns one
+  failure mode (false confidence) into a different, worse one (unnecessary human escalation for
+  things the agent could have resolved autonomously).
+
+### The failure pattern to watch for
+
+> *"I know some icons probably changed upstream, and the codebase probably uses some of them, so
+> I have to estimate whether mine changed."*
+
+This is a forced guess under manufactured uncertainty. It is always a symptom of one or both of:
+1. The agent was not given a means to fetch the upstream rename data directly.
+2. The agent was given a capped/pre-filtered view of the codebase instead of full search access.
+
+When you see this pattern — in a PR comment, in a review, in a test result, anywhere — treat it
+as a design bug and ask: what information or tool was missing?

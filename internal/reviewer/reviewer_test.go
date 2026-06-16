@@ -25,6 +25,7 @@ func TestBuildBrief_IncludesAssessment(t *testing.T) {
 		2,
 		[]string{"commit one", "commit two"},
 		1,
+		"", // no justification (legacy path)
 	)
 
 	if !strings.Contains(brief, "initSentry") {
@@ -45,6 +46,7 @@ func TestBuildBrief_IncludesBumpTipSHA(t *testing.T) {
 		1,
 		[]string{"fix bar"},
 		1,
+		"", // no justification (legacy path)
 	)
 
 	if !strings.Contains(brief, "deadbeef") {
@@ -65,12 +67,53 @@ func TestBuildBrief_IncludesCommitMessages(t *testing.T) {
 		3,
 		[]string{"msg1", "msg2", "msg3"},
 		1,
+		"", // no justification (legacy path)
 	)
 
 	for _, msg := range []string{"msg1", "msg2", "msg3"} {
 		if !strings.Contains(brief, msg) {
 			t.Errorf("brief should contain commit message %q", msg)
 		}
+	}
+}
+
+func TestBuildBrief_IncludesJustification(t *testing.T) {
+	r := newTestReviewer()
+	just := "The upstream library removed the deprecated `initSentry()` API in v10."
+	brief := r.BuildBrief(
+		"abc123",
+		"auto/fix/sentry-node-10.0.0",
+		"assessment text",
+		nil,
+		1,
+		[]string{"fix bar"},
+		1,
+		just,
+	)
+
+	if !strings.Contains(brief, just) {
+		t.Error("brief should contain the justification text")
+	}
+	if !strings.Contains(brief, "## Justification") {
+		t.Error("brief should contain the justification section header")
+	}
+}
+
+func TestBuildBrief_NoJustificationSection(t *testing.T) {
+	r := newTestReviewer()
+	brief := r.BuildBrief(
+		"abc123",
+		"auto/fix/lodash-5.0.0",
+		"assessment text",
+		nil,
+		1,
+		[]string{"fix bar"},
+		1,
+		"", // no justification
+	)
+
+	if strings.Contains(brief, "## Justification") {
+		t.Error("brief should NOT contain the justification section when justification is empty")
 	}
 }
 
@@ -125,6 +168,34 @@ func TestParseResponse_InvalidVerdict(t *testing.T) {
 	_, err := r.ParseResponse(`{"verdict": "maybe", "concerns": []}`)
 	if err == nil {
 		t.Fatal("expected error for invalid verdict 'maybe', got nil")
+	}
+}
+
+func TestParseResponse_JustificationOK(t *testing.T) {
+	r := newTestReviewer()
+	verdict, err := r.ParseResponse(`{"verdict": "approve", "concerns": [], "justification_ok": true, "justification_concern": ""}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !verdict.JustificationOK {
+		t.Error("justification_ok should be true")
+	}
+	if verdict.JustificationConcern != "" {
+		t.Errorf("justification_concern = %q, want empty", verdict.JustificationConcern)
+	}
+}
+
+func TestParseResponse_JustificationNotOK(t *testing.T) {
+	r := newTestReviewer()
+	verdict, err := r.ParseResponse(`{"verdict": "request_changes", "concerns": ["bad code"], "justification_ok": false, "justification_concern": "too vague"}`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if verdict.JustificationOK {
+		t.Error("justification_ok should be false")
+	}
+	if verdict.JustificationConcern != "too vague" {
+		t.Errorf("justification_concern = %q, want %q", verdict.JustificationConcern, "too vague")
 	}
 }
 

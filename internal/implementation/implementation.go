@@ -416,6 +416,11 @@ type RunResult struct {
 	// of re-entering the agent (N4 / MAJOR-1). Empty if cloneAndBranch never ran
 	// (e.g. an early clone/rebase failure — those return GaveUp=false anyway).
 	TipSHA string
+
+	// Justification is the combined agent's structured explanation, held private
+	// through the impl↔reviewer loop and posted to the replacement PR body on
+	// final approval (Q15). Empty on the legacy analyser path.
+	Justification string
 }
 
 // Run executes the full implementation pipeline.
@@ -513,6 +518,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 
 	reviewRetriesLeft := p.config.MaxReviewRetries
 	var lastVerdict *models.ReviewVerdict
+	reviewTurn := 1 // incremented each time the reviewer runs (for its turn-number context)
 
 	for {
 		// CI-fix gate: wait for CI to SETTLE, then decide. Only a settled board
@@ -626,7 +632,8 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 			repoDir, p.bumpTipSHA, branch,
 			analysis.ReviewBody, analysis.CodeChanges,
 			len(commits), messages,
-			1,
+			reviewTurn,
+			p.agentJustification, // Q15: reviewer also evaluates justification (empty on legacy path)
 		)
 		if err != nil {
 			slog.Error("Review failed", "error", err)
@@ -712,6 +719,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 				Detail:        "Implementation complete and review approved",
 				ReviewVerdict: verdict,
 				Branch:        branch,
+				Justification: p.agentJustification, // Q15: propagate for posting to replacement PR body
 			}
 		}
 
@@ -733,6 +741,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 			}
 		}
 		reviewRetriesLeft--
+		reviewTurn++
 		slog.Info("Review agent rejected — resuming worker with concerns",
 			"pr", pr.Number, "retriesLeft", reviewRetriesLeft)
 		p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageResuming, "review-fix")
@@ -1468,6 +1477,16 @@ func (p *Pipeline) canonicalWorkdir(pr models.DependabotPR) (string, error) {
 		return "", fmt.Errorf("creating canonical workdir %s: %w", dir, err)
 	}
 	return dir, nil
+}
+
+// appendToLog appends text to a log file, creating it if needed. Best-effort.
+func appendToLog(path, text string) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.WriteString(text) //nolint:errcheck
 }
 
 func (p *Pipeline) cleanup() {

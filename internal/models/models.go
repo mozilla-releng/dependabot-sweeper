@@ -294,6 +294,14 @@ type CodeChangeEntry struct {
 type ReviewVerdict struct {
 	Verdict  string   `json:"verdict"` // "approve" or "request_changes"
 	Concerns []string `json:"concerns"`
+
+	// JustificationOK is true when the reviewer considers the justification
+	// complete, concise, and grounded in the upstream changes. Populated only
+	// when a justification was provided to the reviewer (combined-agent path).
+	JustificationOK bool `json:"justification_ok,omitempty"`
+	// JustificationConcern is a brief description of why the justification is
+	// inadequate, if JustificationOK is false. Empty when JustificationOK is true.
+	JustificationConcern string `json:"justification_concern,omitempty"`
 }
 
 // CommitInfo is a commit on the implementation branch, surfaced to the reviewer.

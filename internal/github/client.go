@@ -747,6 +747,17 @@ func (c *Client) UpdatePRTitle(ctx context.Context, prNumber int, title string) 
 	return nil
 }
 
+// UpdatePRBody replaces a PR's body text.
+func (c *Client) UpdatePRBody(ctx context.Context, prNumber int, body string) error {
+	_, _, err := c.gh.PullRequests.Edit(ctx, c.owner, c.repoName, prNumber,
+		&github.PullRequest{Body: github.Ptr(body)})
+	if err != nil {
+		return fmt.Errorf("updating body of #%d: %w", prNumber, err)
+	}
+	slog.Info("updated PR body", "pr", prNumber)
+	return nil
+}
+
 // FindPRByBranch finds an open PR whose head branch matches branch. Returns
 // the PR number and whether one was found.
 func (c *Client) FindPRByBranch(ctx context.Context, branch string) (int, bool, error) {

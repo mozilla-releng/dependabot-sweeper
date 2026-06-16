@@ -56,6 +56,8 @@ Review turn: %d (1 = first review; 2+ = reviewing a revised implementation)
 ## Commits (%d total)
 %s
 
+%s
+
 ## Review checklist
 1. Are the changes consistent with the assessment's guidance?
    If the implementation diverged, is the divergence justified?
@@ -63,17 +65,31 @@ Review turn: %d (1 = first review; 2+ = reviewing a revised implementation)
 3. Were any issues worked around rather than properly fixed?
    (e.g. try/catch swallowing errors, hardcoded values, skipped validations)
 4. Are there any obvious code quality issues?
+5. If a justification is provided below: is it complete, concise, and grounded in
+   the actual upstream changes? Does it explain (a) what changed upstream, (b) why
+   the code change was needed, (c) what alternatives were dismissed and why?
+   A justification that is too long, vague, or reproduces the diff is NOT OK —
+   flag it. A crisp, factual justification is what a human reviewer needs to merge
+   with confidence.
 
 ## Response format
 
 After completing your review, respond with ONLY a JSON object:
 {
   "verdict": "approve" or "request_changes",
-  "concerns": ["list of specific concerns, empty if none"]
+  "concerns": ["list of specific code review concerns, empty if none"],
+  "justification_ok": true or false (always include; true if no justification provided),
+  "justification_concern": "brief reason if justification_ok is false, else empty string"
 }
 
 Respond ONLY with the JSON object, no other text.
 `
+
+// justificationSection is appended to the reviewer brief when a justification
+// is available (combined agent path). It is omitted for the legacy analyser path.
+const justificationSection = `## Justification (private — will be posted to PR body on approval)
+
+%s`
 
 // ReviewError indicates a failure in the reviewer's processing logic.
 type ReviewError struct {
@@ -117,8 +133,9 @@ func (r *Reviewer) Review(
 	commitCount int,
 	commitMessages []string,
 	turnNumber int,
+	justification string, // optional (Q15); empty on the legacy analyser path
 ) (*models.ReviewVerdict, error) {
-	brief := r.BuildBrief(bumpTipSHA, branch, assessmentReviewBody, assessmentCodeChanges, commitCount, commitMessages, turnNumber)
+	brief := r.BuildBrief(bumpTipSHA, branch, assessmentReviewBody, assessmentCodeChanges, commitCount, commitMessages, turnNumber, justification)
 
 	slog.Debug("reviewer subprocess check", "commit_count", commitCount, "branch", branch, "repoDir", repoDir)
 
@@ -197,6 +214,7 @@ func (r *Reviewer) runSubprocess(ctx context.Context, repoDir, brief string) (*m
 }
 
 // BuildBrief constructs the brief sent to the reviewer subprocess via stdin.
+// justification is optional (empty string on the legacy analyser path).
 func (r *Reviewer) BuildBrief(
 	bumpTipSHA string,
 	branch string,
@@ -205,6 +223,7 @@ func (r *Reviewer) BuildBrief(
 	commitCount int,
 	commitMessages []string,
 	turnNumber int,
+	justification string,
 ) string {
 	var codeChangesText string
 	if len(assessmentCodeChanges) > 0 {
@@ -228,15 +247,22 @@ func (r *Reviewer) BuildBrief(
 		commitMessagesText = "(no commits)"
 	}
 
+	// Include justification section only when present (combined agent path, Q15).
+	var justificationText string
+	if justification != "" {
+		justificationText = fmt.Sprintf(justificationSection, justification)
+	}
+
 	return fmt.Sprintf(reviewerBrief,
-		bumpTipSHA,          // for git diff command example
-		branch,              // branch name
-		bumpTipSHA,          // bump tip SHA
-		turnNumber,          // turn number
+		bumpTipSHA,           // for git diff command example
+		branch,               // branch name
+		bumpTipSHA,           // bump tip SHA
+		turnNumber,           // turn number
 		assessmentReviewBody,
 		codeChangesText,
 		commitCount,
 		commitMessagesText,
+		justificationText,    // justification section (or empty)
 	)
 }
 
@@ -245,8 +271,10 @@ func (r *Reviewer) ParseResponse(rawOutput string) (*models.ReviewVerdict, error
 	text := llmutil.ExtractJSON(rawOutput)
 
 	var data struct {
-		Verdict  string   `json:"verdict"`
-		Concerns []string `json:"concerns"`
+		Verdict              string   `json:"verdict"`
+		Concerns             []string `json:"concerns"`
+		JustificationOK      bool     `json:"justification_ok"`
+		JustificationConcern string   `json:"justification_concern"`
 	}
 	if err := json.Unmarshal([]byte(text), &data); err != nil {
 		return nil, &ReviewError{Message: fmt.Sprintf("failed to parse reviewer response: %v (raw output length: %d)", err, len(rawOutput))}
@@ -257,7 +285,9 @@ func (r *Reviewer) ParseResponse(rawOutput string) (*models.ReviewVerdict, error
 	}
 
 	return &models.ReviewVerdict{
-		Verdict:  data.Verdict,
-		Concerns: data.Concerns,
+		Verdict:              data.Verdict,
+		Concerns:             data.Concerns,
+		JustificationOK:      data.JustificationOK,
+		JustificationConcern: data.JustificationConcern,
 	}, nil
 }

@@ -1122,7 +1122,8 @@ func (o *Orchestrator) actOnAgentVerdict(
 		// For the combined agent path, the implementation brief is seeded from the
 		// agent's justification (not an analyser review_body). Wrap the justification
 		// in an AgentAnalysis shell for backward compat with the existing brief builders.
-		// TODO(3.8 Q15): Replace with a dedicated brief builder once sub-item F is done.
+		// The justification is also passed via WithAgentJustification for the reviewer
+		// evaluation and for the curate agent commit-message guidance (Q13/Q15).
 		analysisShell := &models.AgentAnalysis{
 			ReviewBody: verdict.Justification,
 		}
@@ -1165,6 +1166,24 @@ func (o *Orchestrator) handlePipelineResult(ctx context.Context, pr models.Depen
 		}
 		if err := o.github.MarkPRReadyForReview(ctx, replacementNumber); err != nil {
 			slog.Warn("failed to mark replacement PR ready", "pr", replacementNumber, "error", err)
+		}
+		// Q15: Post justification to replacement PR body if the combined agent
+		// provided one AND the reviewer confirmed it is OK. The justification is
+		// held private through the impl↔reviewer loop and posted here — at the
+		// moment of final approval — so it is visible to human reviewers of the
+		// replacement PR. On the legacy analyser path, result.Justification is empty.
+		if result.Justification != "" {
+			verdictOK := result.ReviewVerdict == nil || result.ReviewVerdict.JustificationOK
+			if verdictOK {
+				if err := o.github.UpdatePRBody(ctx, replacementNumber, result.Justification); err != nil {
+					slog.Warn("failed to post justification to replacement PR body", "pr", replacementNumber, "error", err)
+				} else {
+					slog.Info("posted justification to replacement PR body", "pr", replacementNumber)
+				}
+			} else {
+				slog.Warn("reviewer flagged justification — not posting to PR body",
+					"pr", replacementNumber, "concern", result.ReviewVerdict.JustificationConcern)
+			}
 		}
 		if err := o.github.ClosePRWithComment(ctx, pr.Number,
 			fmt.Sprintf("Replaced by #%d which includes the necessary code changes "+

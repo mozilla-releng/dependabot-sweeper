@@ -414,3 +414,75 @@ type PRProgress struct {
 	HeadSHA string `json:"head_sha,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
 }
+
+// AgentOutcome is the combined agent's routing decision.
+// It replaces the old Recommendation from AgentAnalysis in the post-Q10 flow.
+type AgentOutcome string
+
+const (
+	// AgentOutcomeRecommend means required-CI is passing and the agent judged
+	// no code change is needed. The agent must provide a concrete WHY in
+	// RecommendBody. The orchestrator re-gates this mechanically (Q4/C3) —
+	// the agent's self-report is never the sole authority on CI state.
+	AgentOutcomeRecommend AgentOutcome = "recommend"
+
+	// AgentOutcomeNeedsChanges means the agent identified required code changes.
+	// The orchestrator enters the implementation pipeline.
+	AgentOutcomeNeedsChanges AgentOutcome = "needs_changes"
+
+	// AgentOutcomeFlagHuman means the agent has a specific, concise insight it
+	// cannot resolve autonomously. FlagReason must be a one/two-sentence
+	// purpose-built explanation — never a dump of the upstream data.
+	AgentOutcomeFlagHuman AgentOutcome = "flag_human"
+
+	// AgentOutcomeGaveUp means the agent could not reach a confident verdict
+	// and suggests leaving a silent draft. No comment is posted.
+	AgentOutcomeGaveUp AgentOutcome = "gave_up"
+)
+
+// AgentVerdict is the structured output from the combined analysis+decision
+// agent (post-Q10). It replaces AgentAnalysis for the non-legacy path.
+//
+// The agent brief must NOT pre-seed upstream data (release notes, changelogs,
+// codebase snippets) — the agent fetches everything it needs autonomously via
+// its tools (agent empowerment principle). The brief contains only PR metadata
+// and the working environment.
+type AgentVerdict struct {
+	// Outcome is the agent's routing decision.
+	Outcome AgentOutcome `json:"outcome"`
+
+	// RecommendBody is a concrete, human-readable WHY for the recommend path
+	// (why no code change is needed, grounded in what the agent verified).
+	// Required when Outcome == AgentOutcomeRecommend; empty otherwise.
+	// This is the product — a human reads it and merges with confidence.
+	// Must NOT reproduce diff/commit info; must cite specific upstream facts.
+	RecommendBody string `json:"recommend_body,omitempty"`
+
+	// FlagReason is a concise one/two-sentence explanation for the flag_human
+	// path. Required when Outcome == AgentOutcomeFlagHuman; empty otherwise.
+	// Must be purpose-built — not a dump of the review body.
+	FlagReason string `json:"flag_reason,omitempty"`
+
+	// Justification is the implementation justification authored by the agent
+	// (Q15). It covers: upstream scope, repo impact, how breaking changes were
+	// handled, what was considered but dismissed as irrelevant.
+	//
+	// This field is populated on the needs_changes path and held PRIVATE through
+	// the impl/reviewer loop — it is NOT posted to the PR body while iterating.
+	// On final reviewer approval it is posted to the PR body and the PR is
+	// un-drafted. The reviewer evaluates the justification too and may challenge
+	// over-long text; the implementer either justifies keeping it or shortens it.
+	//
+	// Replaces the dead ReviewVerdict.Summary field (T13/Q15).
+	Justification string `json:"justification,omitempty"`
+}
+
+// ReviewVerdictWithJustification extends the review verdict to include
+// the reviewer's assessment of the justification (Q15). The reviewer can
+// request changes to the justification too (e.g. "why so long?").
+type ReviewVerdictWithJustification struct {
+	Verdict              string   `json:"verdict"`               // "approve" or "request_changes"
+	Concerns             []string `json:"concerns"`              // code concerns
+	JustificationOK      bool     `json:"justification_ok"`      // true if justification approved
+	JustificationConcern string   `json:"justification_concern"` // e.g. "too long — justify or shorten"
+}

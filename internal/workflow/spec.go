@@ -289,7 +289,10 @@ func Spec() Graph {
 			{From: "dec_ci_gate", To: "impl_resuming", Label: "CI settled, not acceptable, retries remain", Kind: EdgeKindDecision},
 			{From: "impl_resuming", To: "dec_ci_gate", Label: "resume turn complete", Kind: EdgeKindBack},
 			{From: "dec_ci_gate", To: "gave_up", Label: "iterations / time cap reached", Kind: EdgeKindDecision},
-			{From: "dec_ci_gate", To: "dec_review_gate", Label: "CI acceptable", Kind: EdgeKindDecision},
+			{From: "dec_ci_gate", To: "reviewing", Label: "CI acceptable", Kind: EdgeKindDecision},
+
+			// Review stage: reviewer runs, then routes through the review gate
+			{From: "reviewing", To: "dec_review_gate", Kind: EdgeKindNormal},
 
 			// Review gate
 			{From: "dec_review_gate", To: "finalized", Label: "reviewer approves code + justification", Kind: EdgeKindDecision},

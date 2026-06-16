@@ -213,8 +213,8 @@ confirm each outcome (recommend / replacement / flag / silent-draft) on a real P
   `created_prs` table (created→origin) and excluded from scans each cycle; `Store.Reap` only prunes
   `pr_progress` (review C1, regression-tested on both stores). Title is now `SweeperPRTitle` (type
   swapped to `fix`), not a verbatim dependabot-title copy. In-scope stays author-filter-only.
-- [ ] **Dead/hollow fields:** `ReviewVerdict.Summary` is computed "for the PR body" but never
-  used (T13); `PRProgress.BudgetSpent` is always 0. Wire up or remove. (also in backlog memory)
+- [x] **Dead/hollow fields:** `ReviewVerdict.Summary` removed in Phase 3.2 (replaced by Q15
+  justification — f5e0cdb). `PRProgress.BudgetSpent` still always 0 — deferred (minor).
 
 ---
 
@@ -222,27 +222,30 @@ confirm each outcome (recommend / replacement / flag / silent-draft) on a real P
 
 The centrepiece is the fix-first rework; the rest support it.
 
-- [ ] **Collapse analyse+implement into one agentic step (Q10→b).** Remove the separate one-shot
+- [x] **Collapse analyse+implement into one agentic step (Q10→b).** Remove the separate one-shot
   `analyser` package; a single agent with a live checkout analyses upstream + impact and ends in
   recommend-with-WHY / replacement-PR / human-attention / silent-draft. Green CI alone never
   recommends without the agent's reasoned WHY. Keep the independent reviewer on the fix path.
-  (T8, Q10)
-- [ ] **Remove attribution + base-suppression-as-success.** Success = genuine green; only
-  `--ignore-check` suppresses. (Q1/Q2/Q3; CI acceptance model)
-- [ ] **Silent-draft-on-failure + concise-reason-on-flag.** No noise unless there's a useful
+  (T8, Q10) **Done — Phase 3.2 cluster (dc84af8, 57bd970).**
+- [x] **Remove attribution + base-suppression-as-success.** Success = genuine green; only
+  `--ignore-check` suppresses. (Q1/Q2/Q3; CI acceptance model) **Done — f84fb1f (base suppression
+  removed from AcceptableGiven), aed77c8 (GaveUp path silent).**
+- [x] **Silent-draft-on-failure + concise-reason-on-flag.** No noise unless there's a useful
   insight; when flagging, a one/two-sentence purpose-built reason, never a `review_body` dump.
   ⚠️ **A silent failed draft MUST record a sticky `gave_up` outcome at the head SHA** (review M1)
   so the SHA-skip fires before `FindPRByBranch` — otherwise next cycle the open draft is mistaken
   for a finalized replacement (false success + original closed) and/or re-enters the agentic step
   (cost). Open the draft only after a **non-empty** head SHA is captured, and record against the
   **post-rebase tip SHA** (review N3/N4 — `recordOutcome` no-ops on empty SHA; scan-time SHA drifts
-  after rebase → skip miss → re-entry). (Q3, T8, M1, N3, N4)
-- [ ] **Enforce `approve` only when green** programmatically (prompt + output validation). (Q4)
-- [ ] **Keep inherit-and-rebase; do NOT reconstruct-from-base (Q11 → A).** Retain
+  after rebase → skip miss → re-entry). (Q3, T8, M1, N3, N4) **Done — 57bd970.**
+- [x] **Enforce `approve` only when green** programmatically (prompt + output validation). (Q4)
+  **Done — actOnAgentVerdict re-gates recommend on fresh required-CI read (57bd970).**
+- [x] **Keep inherit-and-rebase; do NOT reconstruct-from-base (Q11 → A).** Retain
   `manualRebase`/`IsBranchBehindBase`/`-X theirs` (inheriting dependabot's bump carries its
   lockfile for free — no toolchain needed). The only change here is the T9 narrow fix above. Note
   the residual: `-X theirs` lockfile-conflict resolution can be subtly wrong (rare, CI-caught).
-- [ ] **Worker-authored fix justification (Q15 → DECIDED).** Implementer authors a structured
+  **Confirmed — no change needed; inherited from Phase 2.**
+- [x] **Worker-authored fix justification (Q15 → DECIDED).** Implementer authors a structured
   justification (upstream scope, repo impact, how breaking changes were handled, what was
   considered-but-irrelevant). Held **private** through the implementer↔reviewer loop (not in the
   PR body while iterating); the reviewer reviews the justification *and* the code; on final
@@ -251,10 +254,12 @@ The centrepiece is the fix-first rework; the rest support it.
   critical context needs it; reviewer challenges over-long ("why so long?") → implementer
   justifies (keep) or shortens (take shorter); **no hard truncation**. Replaces dead
   `ReviewVerdict.Summary`. Apply the "tell-the-agent-why" prompt principle (memory). (T13, Q15)
-- [ ] **Commit-history finalization (Q13 → DECIDED → c).** The agent curates its own history before
+  **Done — f5e0cdb.**
+- [x] **Commit-history finalization (Q13 → DECIDED → c).** The agent curates its own history before
   finalize: soft-reset to the post-rebase bump tip (same SHA as the T9 fix) and re-commit its work
   as one or more intentional, well-messaged logical commits. Replaces the orchestrator's blind
   `squashBranch`; dependabot's bump commit(s) stay preserved (Q11). Resolves T11; pairs with Q15.
+  **Done — dad881b (curateBranch / runCurateSubprocess).**
 - [x] **Sweeper-PR naming + tracking (Q14 → DECIDED).** **PR #6.** (1) `SweeperPRTitle` swaps the
   conventional type to `fix` / prepends `fix(deps): ` ✓. (2) reap-exempt `created_prs` table +
   scan exclusion ✓. (3) created→origin reverse link stored (feeds the Phase-4 pairing UI) ✓.
@@ -335,8 +340,9 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 
 ### 6.A — Combined agent: full tool access and autonomous information gathering
 
-- [ ] **Run the combined agent with `--dangerously-skip-permissions`.** Do not enumerate or
+- [x] **Run the combined agent with `--dangerously-skip-permissions`.** Do not enumerate or
   restrict individual tools — the agent is autonomous and uses whatever it needs.
+  **Done — internal/agent/agent.go (dc84af8).**
 - [x] **Remove `--bare` from the worker command** (`implementation.go:1057`). `--bare` disables
   hooks, skills, and plugins — capabilities installed on the managed GCP instance that the
   agent should be free to use. Blocking them is the same principle violation as restricting

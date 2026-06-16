@@ -6,20 +6,6 @@ import (
 	"time"
 )
 
-func TestBumpRank(t *testing.T) {
-	// Ordering: major > minor > patch > unknown. unknown must rank strictly
-	// below patch so any engage threshold (incl. the default major) skips it.
-	if !(BumpRank(BumpMajor) > BumpRank(BumpMinor) &&
-		BumpRank(BumpMinor) > BumpRank(BumpPatch) &&
-		BumpRank(BumpPatch) > BumpRank(BumpUnknown)) {
-		t.Errorf("rank order wrong: major=%d minor=%d patch=%d unknown=%d",
-			BumpRank(BumpMajor), BumpRank(BumpMinor), BumpRank(BumpPatch), BumpRank(BumpUnknown))
-	}
-	// An unrecognised value ranks the same as unknown (lowest).
-	if BumpRank(BumpType("nonsense")) != BumpRank(BumpUnknown) {
-		t.Errorf("unrecognised bump should rank as unknown (lowest)")
-	}
-}
 
 func TestSettled(t *testing.T) {
 	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)

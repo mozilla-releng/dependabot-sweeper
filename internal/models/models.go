@@ -13,23 +13,6 @@ const (
 	BumpUnknown BumpType = "unknown"
 )
 
-// BumpRank orders bump severity for policy comparisons: major > minor > patch >
-// unknown. A higher rank is more significant. unknown ranks lowest on purpose,
-// so any min-bump-to-engage threshold (including the default `major`) skips
-// PRs whose title didn't parse into a recognised bump (Q5/Q14): processing an
-// unparseable-title PR would otherwise reach the expensive agent unintentionally.
-func BumpRank(b BumpType) int {
-	switch b {
-	case BumpMajor:
-		return 3
-	case BumpMinor:
-		return 2
-	case BumpPatch:
-		return 1
-	default: // BumpUnknown and anything unrecognised
-		return 0
-	}
-}
 
 // Recommendation is the analysis agent's verdict on a dependency bump.
 type Recommendation string
@@ -57,7 +40,7 @@ const (
 	ActionClosedStale     Action = "closed_stale"
 	ActionReplacementPR   Action = "replacement_pr"
 	ActionFlaggedForHuman Action = "flagged_for_human"
-	ActionSkippedPolicy   Action = "skipped_policy" // bump below min-bump-to-engage (Q5)
+	ActionSkippedPolicy   Action = "skipped_policy" // stale or superseded PR
 	ActionSkippedPending  Action = "skipped_ci_pending"
 	ActionSkippedNoChange Action = "skipped_no_change"
 	ActionError           Action = "error"

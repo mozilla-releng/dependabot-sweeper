@@ -268,13 +268,6 @@ func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 	return out
 }
 
-// belowMinBump reports whether a bump is below the configured engage threshold
-// and should be skipped out of policy (Q5). unknown ranks lowest, so the default
-// `major` threshold skips it — a non-bump PR from the trusted author never
-// reaches the agent. Pure.
-func belowMinBump(bump, min models.BumpType) bool {
-	return models.BumpRank(bump) < models.BumpRank(min)
-}
 
 func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, allPRs []models.DependabotPR) models.ReviewResult {
 	slog.Info("Processing PR",
@@ -290,35 +283,12 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	// sight, and re-stamping it every cycle was the reporting-noise bug (T6a).
 	// Populate version metadata and initial CI snapshot immediately so the
 	// dashboard can show old→new and CI state even for PRs that are skipped
-	// early (patch, stale, not-settled, already-processed) without waiting
+	// early (stale, not-settled, already-processed) without waiting
 	// for analysis to complete.
 	o.setVersions(pr.Number, pr.OldVersion, pr.NewVersion, pr.Ecosystem, pr.URL)
 	o.setCI(pr.Number, pr.CI)
 
-	// Step 1: Skip bumps below the per-repo engage threshold (Q5). The default
-	// `major` skips passing patch/minor (dependabot auto-merges those) AND
-	// `unknown`-titled PRs (BumpRank ranks unknown lowest) — so a non-bump PR
-	// from the trusted author never reaches the agent. A grouped PR is ranked by
-	// its highest member bump (maxGroupedBump), so a group is engaged iff that
-	// max meets the threshold. The reason is recorded on the dashboard.
-	if belowMinBump(pr.BumpType, o.config.MinBumpToEngage) {
-		detail := fmt.Sprintf("skipped: %s bump — below the configured minimum to engage (%s)",
-			pr.BumpType, o.config.MinBumpToEngage)
-		slog.Info("Bump below engage threshold — skipping", "pr", pr.Number,
-			"bump", pr.BumpType, "min", o.config.MinBumpToEngage)
-		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageSkipped, detail)
-		return models.ReviewResult{
-			PRNumber:    pr.Number,
-			PackageName: pr.PackageName,
-			OldVersion:  pr.OldVersion,
-			NewVersion:  pr.NewVersion,
-			Action:      models.ActionSkippedPolicy,
-			Detail:      detail,
-			Success:     true,
-		}
-	}
-
-	// Step 2: Staleness. A PR is superseded if a newer INDIVIDUAL PR bumps the
+	// Step 1: Staleness. A PR is superseded if a newer INDIVIDUAL PR bumps the
 	// same package higher (existing behaviour), or (Q6) a grouped PR already
 	// covers this package at >= this version. A grouped PR is never closed as
 	// stale — it bumps other members too — and an individual never closes a

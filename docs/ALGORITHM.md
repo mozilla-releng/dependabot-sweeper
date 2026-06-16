@@ -10,8 +10,8 @@ can drive concrete code fixes.
 ## North Star (the driving UX principle)
 
 **This is the high-level UX principle that drives the entire architecture. Everything else
-serves it.** For each engaged dependabot major-bump PR, the tool produces exactly one of two
-outcomes:
+serves it.** For each engaged dependabot PR (any bump type, once CI has settled), the tool
+produces exactly one of two outcomes:
 
 1. **No changes needed → comment on the *existing* dependabot PR**, explaining *why* it is OK to
    merge. Required checks must be passing **and** the agent must have determined that *absolutely
@@ -44,23 +44,7 @@ every decision in this document.)
 
 ## Purpose
 
-Dependabot opens PRs to bump dependencies. Which bumps a human ever needs to look at is a
-**per-repo policy**, set by that repo's dependabot auto-merge configuration. For the primary
-initial target (`taskcluster/taskcluster`), the policy is understood to be:
-
-- **Patch** — auto-merged once CI passes. Out of scope for the tool.
-- **Minor** — auto-merged once CI passes. Out of scope for the tool.
-- **Major** — always needs human attention; never auto-merged. **This is the tool's job.**
-
-So for taskcluster the tool engages **major bumps only**. Exact thresholds are per-repo
-config — other repos, supported later, may want minor or patch engaged too.
-
-Major version bumps often require code changes because the new version introduces breaking
-API changes — dependabot identifies the version change but does not make the code changes. The
-CI on the dependabot PR is likely failing for exactly this reason, and making that CI green
-(by writing the compatibility changes) is the core of what the tool does.
-
-The tool's job is:
+Dependabot opens PRs to bump dependencies. The tool's job is:
 
 1. **Triage** — for each open dependabot PR, decide what kind of attention it needs.
 2. **Fix** — for PRs that need code changes, make those changes autonomously and open a
@@ -123,9 +107,8 @@ Each cycle, the tool lists **all open PRs** on the scanned repo, then keeps only
 
 PRs by any other author are ignored entirely. There is no up-front filter by bump type: a PR
 that survives the author filter enters the pipeline **regardless of patch/minor/major** — the
-bump-type, staleness, CI-settled, and already-processed skips all happen *inside* the
-per-PR steps below (steps 1–4), not as a pre-filter. So "skip a passing minor" (per Q5) is a
-decision made during processing, not a reason the PR never enters the loop.
+staleness, CI-settled, and already-processed checks all happen *inside* the per-PR steps below,
+not as a pre-filter.
 
 Titles that don't parse as a known bump format are still processed (with bump type `unknown`)
 rather than dropped — in an unattended cron loop, silently losing a PR is worse than analysing
@@ -140,7 +123,7 @@ attacker-spoofable). See T12.
 
 ## The decision algorithm (current)
 
-> **⚠️ Baseline, not target (review N5).** This section, "CI acceptance model," and the Step 6
+> **⚠️ Baseline, not target (review N5).** This section, "CI acceptance model," and the Step 5
 > routing table describe the **pre-rework baseline** — the design as the code stands today,
 > including the separate analyser and its `approve`/`needs_changes`/`needs_human_review`
 > vocabulary. The **target** design is the North Star + the decided questions (esp. Q10's single
@@ -149,28 +132,7 @@ attacker-spoofable). See T12.
 
 Each accepted PR is processed independently on every cycle. The steps below are in order.
 
-### Step 1 — Skip by bump type (per-repo policy)
-
-Which bump types the tool engages is **per-repo policy**, driven by that repo's dependabot
-auto-merge configuration. The rule for the primary target (`taskcluster`) is simple:
-
-> **Engage major bumps only. Skip everything else (patch and minor).**
-
-The reasoning: taskcluster auto-merges passing patch and minor bumps, so the tool would add
-nothing there. Only major bumps reliably need code changes and human review, so they are the
-tool's entire job for this repo.
-
-**Divergence from the code.** The code currently skips *only* `patch` (and only when the PR
-is not a grouped update); it still analyses every minor bump. Under the taskcluster policy it
-should skip minor too. This rule must be per-repo configurable — other repos may want minor
-(or patch) engaged — so it should not be hardcoded. See Q5.
-
-**Accepted consequence.** A minor bump that *fails* CI will not auto-merge and the tool will
-not touch it either — it sits unmerged until a human deals with it or a newer PR supersedes
-it. For taskcluster this is acceptable: handling failing non-major bumps is explicitly out of
-scope, not an oversight.
-
-### Step 2 — Skip stale PRs
+### Step 1 — Skip stale PRs
 
 If a newer PR exists for the same package (a later version), the current PR is superseded.
 The tool closes it with a comment pointing to the newer one.
@@ -199,7 +161,7 @@ PR overlaps with a grouped update PR that includes the same package. Two reasons
   stay open and both be processed independently — duplicated work, and potentially two
   replacement PRs touching the same dependency. See Q6.
 
-### Step 3 — Wait for CI to settle
+### Step 2 — Wait for CI to settle
 
 The tool will not triage a PR while CI is still running. "Settled" means every check has
 reached a terminal state (completed with any conclusion) or has been pending long enough to
@@ -227,13 +189,13 @@ If the check set cannot be fetched (API error), CI is marked `unknown` and the P
 and revisited — a partial/empty set must never read as "vacuously green," which would risk an
 erroneous approve.
 
-### Step 4 — Skip already-processed SHAs
+### Step 3 — Skip already-processed SHAs
 
 If the tool has already recorded a terminal outcome for this PR at its current head SHA,
 nothing has changed — skip with zero LLM calls. The PR will be re-processed automatically
 if dependabot pushes a new commit (new head SHA).
 
-### Step 5 — Analyse
+### Step 4 — Analyse
 
 The tool calls the **analyser** (Claude API, structured JSON output). The analyser receives a
 fixed, pre-assembled prompt — it is **not agentic** and cannot fetch anything itself (see T7).
@@ -275,7 +237,7 @@ bucket for uncertainty. The prompt therefore biases toward flagging on doubt —
 cast by the worst-equipped agent (non-agentic, truncated context, no checkout, per T7) over
 whether the best-equipped one (the agentic worker) should even try. See T8 and Q10.
 
-### Step 6 — Route based on verdict and CI state
+### Step 5 — Route based on verdict and CI state
 
 This is the branching point. Priority order:
 
@@ -314,7 +276,7 @@ note); it is never rejected or sent back to the analyser. Two precise consequenc
     design may be to forbid `approve` in the analyser whenever CI is unacceptable, so the
     verdict means one thing end-to-end instead of being emitted then overridden.
 
-### Step 7 — Implementation pipeline (when `needs_changes`)
+### Step 6 — Implementation pipeline (when `needs_changes`)
 
 See the implementation pipeline section below.
 
@@ -928,15 +890,11 @@ agent claims "safe to recommend" but the orchestrator's own read shows required 
 it does not recommend. That mechanical re-read *is* the Q4 enforcement; the old "validate the
 `approve` enum" framing is dropped.
 
-**Q5. DECIDED → (a).** A single per-repo config value — the *minimum bump type to engage*
-(default `major`); skip anything below it. Predictable one-line config; avoids inferring
-auto-merge intent from scattered/undiscoverable config (option b rejected). The code currently
-hardcodes "skip only patch" — replace with this. **Sub-question DECIDED:** skipped-out-of-policy
-bumps are still recorded on the dashboard with a note (e.g. "skipped: minor — out of policy"), so
-"why isn't the tool touching this?" is answerable. Implementation (review minor): reuse the
-existing `major>minor>patch>unknown` ordering in `maxGroupedBump` — `unknown` is already lowest,
-so `min-bump-to-engage = major` naturally skips `unknown`-titled PRs (the empty-commit validation
-case) without a new comparison.
+**Q5. SUPERSEDED.** Previously decided a `--min-bump-to-engage` config value (default `major`)
+that skipped patch/minor bumps. That concept has been removed. The current rule is: engage any
+open dependabot PR once its CI has settled, regardless of bump type. The only skip conditions are
+stale/superseded PR, already-processed SHA, or dry run. Bump type (`patch`/`minor`/`major`/`unknown`)
+is still classified and shown on the dashboard; it is no longer a gate.
 
 **Q6. DECIDED → (a).** Decompose a grouped PR into its member `(package, version)` pairs (already
 parsed into `GroupedUpdates`) and run the same semver comparison against individual PRs.
@@ -998,9 +956,9 @@ the upstream changes + codebase impact. A single agent with a live checkout hand
 end and ends in one of: **recommend** (green + judged OK, *with a concise WHY* — e.g. "only `xxxx`
 changed and we don't use it"); **replacement PR** (needed changes / required-CI red → fix →
 required-green → open with justification); or **`needs_human_attention`** with a concise reason
-(else silent draft). Cost is tier-3 on every engaged PR but bounded — "engaged" is already
-narrowed by Q5 (major only) and the already-processed-SHA skip, so it's once per new major-bump
-SHA. This removes the analyser/worker split that was the root cause of the T1–T8 cluster.
+(else silent draft). Cost is tier-3 on every engaged PR but bounded — cost is controlled entirely by the
+already-processed-SHA skip (once per new dependabot-PR head SHA) and the idempotency invariant.
+This removes the analyser/worker split that was the root cause of the T1–T8 cluster.
   - The **reviewer** (independent check for deleted tests / workarounds on the *fix* path) is a
     separate concern and is kept by default — an independent perspective has value. Revisit only
     if it proves redundant.
@@ -1137,7 +1095,7 @@ up for review" instinct.
     - *Hypothesis to validate (see WORKPLAN):* a PR from the trusted author that *isn't* a bump
       should exit early at bump-classification and never reach an agent — making author-only
       sufficient. ⚠️ NOT guaranteed in current code: an unparseable title is processed as bump type
-      `unknown`. Q5's `min-bump-to-engage` skip logic must treat `unknown`/below-major as **skip**.
+      `unknown`, and the pipeline does not skip `unknown` bumps.
       Validate with an empty-commit PR from the trusted author.
   - **Pairing/tracking:** the sweeper PR is an **attribute of the originating dependabot PR's row**
     (add a reverse link), not a first-class tracked entity. The dependabot PR is the unit of work;

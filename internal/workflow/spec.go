@@ -173,8 +173,8 @@ func Spec() Graph {
 				Kind:    NodeKindTerminal,
 				Label:   "Skipped",
 				Phase:   "Done+Flagged",
-				Summary: "No action taken — patch bump, stale superseded PR, already-processed SHA, or dry run.",
-				Where:   "orchestrator.go:processPR steps 1–4",
+				Summary: "No action taken — stale superseded PR, already-processed SHA, or dry run.",
+				Where:   "orchestrator.go:processPR",
 			},
 			{
 				ID:      string(models.StageFlagged),
@@ -208,8 +208,8 @@ func Spec() Graph {
 				ID:      "dec_early_exit",
 				Kind:    NodeKindDecision,
 				Label:   "Skip?",
-				Summary: "Is this a patch bump, a stale superseded PR, an already-processed SHA, or a dry run?",
-				Where:   "orchestrator.go:processPR steps 1–4",
+				Summary: "Is this a stale superseded PR, an already-processed SHA, or a dry run?",
+				Where:   "orchestrator.go:processPR",
 			},
 			{
 				ID:      "dec_ci_settled",
@@ -253,7 +253,7 @@ func Spec() Graph {
 			{From: "pending", To: "dec_early_exit", Kind: EdgeKindNormal},
 
 			// Early-exit outcomes
-			{From: "dec_early_exit", To: "skipped", Label: "patch / stale / already-processed / dry-run", Kind: EdgeKindDecision},
+			{From: "dec_early_exit", To: "skipped", Label: "stale / already-processed / dry-run", Kind: EdgeKindDecision},
 			{From: "dec_early_exit", To: "dec_ci_settled", Label: "none of the above", Kind: EdgeKindDecision},
 
 			// CI-settled gate

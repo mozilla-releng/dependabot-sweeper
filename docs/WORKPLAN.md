@@ -30,16 +30,16 @@ tip SHA) was folded in. No Criticals across any round.)_
   SHA-skip must all be airtight. Cost is NOT capped by skipping the agent on easy PRs (no tier-1
   short-circuit — even green bumps get the full agent to write the WHY).
 
-- **NORTH STAR (drives all architecture).** For each engaged major-bump PR, produce one of two
-  well-justified outcomes: (1) **no change needed → comment on the existing dependabot PR** with a
-  concrete WHY (required checks green + agent certain no change needed); or (2) **changes needed →
-  open the tool's own replacement PR, based on the dependabot one** — same bump + one or more
-  additional commits doing the extra work, with a justification of why those changes are
-  correct/needed/appropriate and how it's the right solution for this bump, grounded in upstream
-  docs/changelogs/diffs. ("Based on" = supersedes it and contains the same bump, *not* literal
-  commit reuse.) The justification *is the product* — a human reads a short specific rationale and
-  merges with confidence. Last resort only: a concise human-attention flag. (Full text:
-  `docs/ALGORITHM.md` → North Star; canonical home `docs/PRINCIPLES.md`.)
+- **NORTH STAR (drives all architecture).** For each engaged dependabot PR (any bump type, once
+  CI has settled), produce one of two well-justified outcomes: (1) **no change needed → comment on
+  the existing dependabot PR** with a concrete WHY (required checks green + agent certain no change
+  needed); or (2) **changes needed → open the tool's own replacement PR, based on the dependabot
+  one** — same bump + one or more additional commits doing the extra work, with a justification of
+  why those changes are correct/needed/appropriate and how it's the right solution for this bump,
+  grounded in upstream docs/changelogs/diffs. ("Based on" = supersedes it and contains the same
+  bump, *not* literal commit reuse.) The justification *is the product* — a human reads a short
+  specific rationale and merges with confidence. Last resort only: a concise human-attention flag.
+  (Full text: `docs/ALGORITHM.md` → North Star; canonical home `docs/PRINCIPLES.md`.)
 
 - **One agentic step; no separate analyser (Q10→b).** Fix-first, not predict-first. Every engaged
   PR goes to a single agent with a live checkout that analyses upstream + codebase impact and ends
@@ -105,7 +105,7 @@ repo). Tick the phase when its items below are done.
   2. [ ] One-agent step; remove the separate analyser (Q10) — **deferred (cluster; agentic, see plan)**.
   2b. [ ] Q8 transition guard (after spec.go reconciled) — **deferred (cluster)**.
   3. [ ] No-attribution + silent-draft + approve-only-when-green (Q1/Q2/Q3/Q4) — **deferred (cluster)**.
-  4. [x] Skip-by-`min-bump` config + `unknown`→skip (Q5); group↔individual supersession (Q6). **PR #4.**
+  4. [x] Group↔individual supersession (Q6). **PR #4.** (Q5 `--min-bump-to-engage` was also shipped here but has since been superseded — see Q5 in ALGORITHM.md.)
   5. [x] No-progress progress-metric, K=8 (Q12). **PR #3.**
   6. [ ] Agent curates its own history (Q13) — **deferred (agentic; pairs with the cluster).**
   7. [x] Sweeper-PR naming + DB-record exclusion + pairing attribute (Q14). **PR #6.**
@@ -276,10 +276,9 @@ The centrepiece is the fix-first rework; the rest support it.
   (`client.go:156-161`) → `BumpUnknown`, `PackageName = title`. In `processPR` the only early
   bump-type skip is `pr.BumpType == BumpPatch && !pr.Grouped` (`orchestrator.go:236`), so an
   `unknown` bump is **not** skipped — it proceeds past the stale/settled/SHA gates straight into
-  the analyser (the expensive step). **Confirms the warning: it fails today.** Q5's
-  `min-bump-to-engage` skip must treat `unknown`/below-major as skip (Phase 3.4); `maxGroupedBump`
-  already ranks `unknown` lowest, so `min-bump = major` naturally excludes it. A regression test
-  is authored alongside the Phase 3.4 skip (asserting `unknown` → skipped, never analysed), rather
+  the analyser (the expensive step). **Confirms the warning: it fails today.** The pipeline must
+  skip `unknown`-typed PRs from the trusted author rather than sending them to the agent.
+  A regression test is needed (asserting `unknown` → skipped, never analysed), rather
   than a now-and-rewrite-later test asserting the current (wrong) behaviour.
 - [x] **Confirm T9 empirically on petemoore/taskcluster #193** (`c1671f49`). **Done 2026-06-15.**
   The "fix" commit `c1671f49` ("fix: update code for query-string 7.1.1 → 9.3.1 compatibility")
@@ -307,9 +306,9 @@ The centrepiece is the fix-first rework; the rest support it.
   `decideNoProgress` now tracks the lowest blocking-check count (monotonic floor) and gives up when
   it hasn't improved over `MaxNoProgressIterations` (default 8, now a CLI flag) settled attempts.
   Floor beats oscillation; no off-by-one. Subsumes stationary + thrashing. (Resolves T10.)
-- [x] **Skip-by-bump-type per repo (Q5 → DECIDED → a).** **PR #4.** `--min-bump-to-engage`
-  (default `major`); `models.BumpRank` skips anything below it, incl. `unknown` (closes the Phase-0
-  finding). Recorded on the dashboard (`ActionSkippedPolicy`).
+- [x] ~~**Skip-by-bump-type per repo (Q5).**~~ **PR #4 shipped `--min-bump-to-engage` / `BumpRank`,
+  but Q5 is now superseded** — the engage-threshold concept has been removed. Bump type is still
+  classified and shown on the dashboard; it is no longer a gate. See Q5 in ALGORITHM.md.
 - [x] **Grouped-PR supersession (Q6 → DECIDED → a).** **PR #4.** `FindSupersedingGroup` closes an
   individual when a group covers its package at ≥ its version; a group is never closed by an
   individual (asymmetric). Kills duplicate work / duplicate replacement PRs.

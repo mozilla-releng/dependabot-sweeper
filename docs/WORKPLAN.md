@@ -345,10 +345,8 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
   implementation agent already runs (`implementation.go:1057`). Do not enumerate or restrict
   individual tools — the agent is autonomous and uses whatever it needs. The current worker
   already has this right; the combined agent must not regress to the tool-less analyser model.
-- [ ] **Verify `--bare` does not suppress built-in tools.** The worker command includes `--bare`
-  (comment: "no hooks/skills/plugins"). This disables hooks, skills, and plugins — not built-in
-  tools like WebFetch or Bash, which are likely unaffected. Confirm before implementation; if
-  `--bare` does suppress built-in tools, remove it from the combined agent invocation.
+  (Note: the worker also passes `--bare` — "no hooks/skills/plugins". This disables plugins,
+  not built-in tools; no change expected. Confirm holds when wiring up the combined agent.)
 - [ ] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
   URL if the changelog is truncated" — with full tool access the agent can do this itself.
 - [ ] **Reframe pre-fetched upstream data as a hint, not the ceiling.** The orchestrator may still

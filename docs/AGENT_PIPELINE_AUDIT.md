@@ -261,7 +261,7 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
 ### Stage 3 (upstream info)
 - [ ] The combined agent is invoked with `--dangerously-skip-permissions` — no tool enumeration
   or allowlist; the agent uses whatever it needs (verifiable by inspecting the
-  `workerCommand`-equivalent function); `--bare` confirmed not to suppress built-in tools
+  `workerCommand`-equivalent function)
 - [ ] The dead-letter "follow the compare URL if the changelog is truncated" instruction in
   `analyser.go:46–47` is replaced with a real WebFetch tool access instruction
 - [ ] The agent brief contains an explicit hint-framing clause ("this data was pre-fetched; use

@@ -18,6 +18,8 @@ func TestBuildBrief_IncludesAssessment(t *testing.T) {
 	brief := r.BuildBrief(
 		"abc123",
 		"auto/fix/sentry-node-10.0.0",
+		"/workdir/pr-42",
+		"cafebabe",
 		"Breaking: removed initSentry()",
 		[]models.CodeChangeEntry{
 			{File: "src/sentry.js", Description: "update import"},
@@ -41,6 +43,8 @@ func TestBuildBrief_IncludesBumpTipSHA(t *testing.T) {
 	brief := r.BuildBrief(
 		"deadbeef",
 		"auto/fix/lodash-5.0.0",
+		"/workdir/pr-42",
+		"cafebabe",
 		"assessment text",
 		nil,
 		1,
@@ -57,11 +61,36 @@ func TestBuildBrief_IncludesBumpTipSHA(t *testing.T) {
 	}
 }
 
+func TestBuildBrief_IncludesWorkdirAndHEAD(t *testing.T) {
+	r := newTestReviewer()
+	brief := r.BuildBrief(
+		"deadbeef",
+		"auto/fix/lodash-5.0.0",
+		"/sweeper-data/pr/owner-repo/pr-99",
+		"cafebabe1234",
+		"assessment text",
+		nil,
+		1,
+		[]string{"fix bar"},
+		1,
+		"",
+	)
+
+	if !strings.Contains(brief, "/sweeper-data/pr/owner-repo/pr-99") {
+		t.Error("brief should contain the working directory path")
+	}
+	if !strings.Contains(brief, "cafebabe1234") {
+		t.Error("brief should contain the HEAD SHA")
+	}
+}
+
 func TestBuildBrief_IncludesCommitMessages(t *testing.T) {
 	r := newTestReviewer()
 	brief := r.BuildBrief(
 		"abc123",
 		"auto/fix/lodash-5.0.0",
+		"/workdir/pr-42",
+		"cafebabe",
 		"assessment text",
 		nil,
 		3,
@@ -83,6 +112,8 @@ func TestBuildBrief_IncludesJustification(t *testing.T) {
 	brief := r.BuildBrief(
 		"abc123",
 		"auto/fix/sentry-node-10.0.0",
+		"/workdir/pr-42",
+		"cafebabe",
 		"assessment text",
 		nil,
 		1,
@@ -104,6 +135,8 @@ func TestBuildBrief_NoJustificationSection(t *testing.T) {
 	brief := r.BuildBrief(
 		"abc123",
 		"auto/fix/lodash-5.0.0",
+		"/workdir/pr-42",
+		"cafebabe",
 		"assessment text",
 		nil,
 		1,

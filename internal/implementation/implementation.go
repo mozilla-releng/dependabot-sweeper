@@ -119,9 +119,12 @@ needs fixing. Your work will be independently reviewed by a separate review agen
 that checks for correctness and consistency with the assessment. The review agent
 will flag any deleted tests, workarounds, or unjustified divergences from the plan.
 
-Understanding this context matters: write clear commit messages that explain your
-reasoning, because the review agent and human reviewers will use them to evaluate
-your work.
+Why this role exists: the tool's goal is to reduce the human attention maintainers
+spend on dependency bumps. You exist to make the codebase compatible with the new
+version so the maintainer can merge with confidence. The review agent and the
+maintainer will both evaluate your work — write clear commit messages that explain
+your reasoning so they can judge whether the fix is correct without re-deriving
+your analysis.
 
 ## Dependency upgrade
 - Package: %s
@@ -215,9 +218,12 @@ needs fixing. Your work will be independently reviewed by a separate review agen
 that checks for correctness and consistency with the assessment. The review agent
 will flag any deleted tests, workarounds, or unjustified divergences from the plan.
 
-Understanding this context matters: write clear commit messages that explain your
-reasoning, because the review agent and human reviewers will use them to evaluate
-your work.
+Why this role exists: the tool's goal is to reduce the human attention maintainers
+spend on dependency bumps. You exist to make the codebase compatible with the new
+version so the maintainer can merge with confidence. The review agent and the
+maintainer will both evaluate your work — write clear commit messages that explain
+your reasoning so they can judge whether the fix is correct without re-deriving
+your analysis.
 
 ## Dependency upgrade
 - Group: %s
@@ -629,10 +635,18 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 			messages[i] = c.Message
 		}
 
+		// Capture HEAD SHA for the reviewer brief so it knows the exact commit
+		// it is reviewing (the brief template includes HEAD: <sha>).
+		var headSHA string
+		if tipOut, tipErr := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output(); tipErr == nil {
+			headSHA = strings.TrimSpace(string(tipOut))
+		}
+
 		p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageReviewing, "")
 		verdict, err := p.reviewer.Review(
 			ctx,
 			repoDir, p.bumpTipSHA, branch,
+			p.workdir, headSHA,
 			analysis.ReviewBody, analysis.CodeChanges,
 			len(commits), messages,
 			reviewTurn,
@@ -817,6 +831,11 @@ func ensureBranchUpToDate(manualRebase func() error) error {
 // authored by Dependabot so the `@dependabot rebase` comment path doesn't
 // apply.
 func (p *Pipeline) manualRebase(ctx context.Context, pr models.DependabotPR) error {
+	// Known short-lived exception: this temp dir exists only for the duration of
+	// the rebase and is cleaned up by the defer below — it is not a PR-keyed
+	// resource. The rebase always completes (or fails) before p.workdir is created,
+	// so there is no overlap with the PR-keyed root. The exception is intentional:
+	// the rebase is a pre-clone operation and has no workdir to nest under yet.
 	workDir, err := os.MkdirTemp("", "sweeper-rebase-*")
 	if err != nil {
 		return fmt.Errorf("creating rebase workdir: %w", err)

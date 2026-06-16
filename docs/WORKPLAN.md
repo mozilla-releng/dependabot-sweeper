@@ -341,12 +341,13 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 
 ### 6.A — Combined agent: full tool access and autonomous information gathering
 
-- [ ] **Run the combined agent with `--dangerously-skip-permissions`**, the same way the
-  implementation agent already runs (`implementation.go:1057`). Do not enumerate or restrict
-  individual tools — the agent is autonomous and uses whatever it needs. The current worker
-  already has this right; the combined agent must not regress to the tool-less analyser model.
-  (Note: the worker also passes `--bare` — "no hooks/skills/plugins". This disables plugins,
-  not built-in tools; no change expected. Confirm holds when wiring up the combined agent.)
+- [ ] **Run the combined agent with `--dangerously-skip-permissions`.** Do not enumerate or
+  restrict individual tools — the agent is autonomous and uses whatever it needs.
+- [ ] **Remove `--bare` from the worker command** (`implementation.go:1057`). `--bare` disables
+  hooks, skills, and plugins — capabilities installed on the managed GCP instance that the
+  agent should be free to use. Blocking them is the same principle violation as restricting
+  tools. Remove from both the existing implementation agent and the combined agent. (This can
+  land as a standalone fix before the rest of Phase 6.)
 - [ ] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
   URL if the changelog is truncated" — with full tool access the agent can do this itself.
 - [ ] **Reframe pre-fetched upstream data as a hint, not the ceiling.** The orchestrator may still

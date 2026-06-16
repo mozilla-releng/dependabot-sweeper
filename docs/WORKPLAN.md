@@ -343,13 +343,14 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 
 - [ ] **Run the combined agent with `--dangerously-skip-permissions`.** Do not enumerate or
   restrict individual tools — the agent is autonomous and uses whatever it needs.
-- [ ] **Remove `--bare` from the worker command** (`implementation.go:1057`). `--bare` disables
+- [x] **Remove `--bare` from the worker command** (`implementation.go:1057`). `--bare` disables
   hooks, skills, and plugins — capabilities installed on the managed GCP instance that the
   agent should be free to use. Blocking them is the same principle violation as restricting
   tools. Remove from both the existing implementation agent and the combined agent. (This can
-  land as a standalone fix before the rest of Phase 6.)
-- [ ] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
+  land as a standalone fix before the rest of Phase 6.) **Done in 08545ac.**
+- [x] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
   URL if the changelog is truncated" — with full tool access the agent fetches what it needs.
+  **Done in 08545ac (analyser.go); also done in 6.E below.**
 - [ ] **Do not pre-fetch upstream data for the agent.** The agent brief contains only what the
   agent cannot derive itself: PR metadata (number, title, package, old version, new version)
   and the working environment (working directory, clone path, role). Release notes, changelogs,
@@ -397,12 +398,14 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 and has no dependency on the analyser-removal cluster. Implement this before or in parallel
 with Phase 3.2.
 
-- [ ] **Run the reviewer as a `claude` subprocess with `--dangerously-skip-permissions` and
+- [x] **Run the reviewer as a `claude` subprocess with `--dangerously-skip-permissions` and
   `proc.Dir` set to the repo directory**, matching the `runWorkerTurn` pattern (not a bare
   `Messages.New` call). Do not enumerate individual tools — the reviewer is autonomous.
-- [ ] **Remove the epistemic-hedging patch** from the reviewer prompt ("do not infer the absence
+  **Done in 08545ac (reviewer.go complete rewrite).**
+- [x] **Remove the epistemic-hedging patch** from the reviewer prompt ("do not infer the absence
   of changes from the cut-off view") — this is the wrong fix. With full tool access the
   reviewer can run `git diff` itself; there is no size cap and no need to hedge.
+  **Done: reviewer.go was rewritten entirely; the hedge is gone.**
 
 ### 6.D — Repo checkout, shared state, and directory lifecycle
 
@@ -451,29 +454,30 @@ reviewer knows it is reviewing a revision, not a fresh submission.
 
 ---
 
-- [ ] **Bare clone lifecycle.** Create `sweeper-base/<owner>-<repo>.git` as a bare clone on
+- [x] **Bare clone lifecycle.** Create `sweeper-base/<owner>-<repo>.git` as a bare clone on
   first use. Re-fetch (including tags) at the start of each scan cycle, **before any PR
   goroutines are launched** — the orchestrator dispatches PRs concurrently
   (`orchestrator.go:244–257`); a fetch racing with active agent processes is a race condition.
   If `git fetch` fails (disk full, network error, `.git` corruption), delete and do a full
   re-clone rather than propagating the failure. Scoped per-repo — never shared across repos.
+  **Done in 08545ac (`ensureBareClone` in orchestrator.go; fetch before goroutine loop).**
 
-- [ ] **Per-PR working directory and clone.** Go program creates
+- [x] **Per-PR working directory and clone.** Go program creates
   `sweeper-data/pr/<owner>-<repo>/pr-<N>/` and runs `git clone <bare-path> repo` inside it.
   Both paths included in every agent brief. Canonical schema used consistently throughout
   codebase and documentation — owner+repo in the path ensures PRs from different repos with
-  the same number never collide.
+  the same number never collide. **Done in 08545ac (`canonicalWorkdir`, `DataDir` config field).**
 
-- [ ] **Stale directory detection.** If `<workdir>` already exists at run start (crash residue),
+- [x] **Stale directory detection.** If `<workdir>` already exists at run start (crash residue),
   the Go program deletes it and recreates it — never silently reuses potentially dirty state.
   No branch ref complications: agents work in their own clones and do not add branches to the
-  bare clone.
+  bare clone. **Done in 08545ac.**
 
-- [ ] **Agent log files must be PR-scoped, not shared.** Currently all agent logs go to
+- [x] **Agent log files must be PR-scoped, not shared.** Currently all agent logs go to
   `os.TempDir()/sweeper-agent-logs/` with no PR scoping. Multiple concurrent agents interleave
   logs in the same directory and the files are never cleaned up. Fix: write logs under
   `<workdir>/` so they are removed when the working directory is deleted on PR close. This
-  closes both the collision problem and the disk growth problem.
+  closes both the collision problem and the disk growth problem. **Done in 08545ac.**
 
 - [ ] **All per-PR resources live under one PR-keyed root — nothing hidden outside it.**
   Every resource the Go program creates for a PR must live under
@@ -493,7 +497,7 @@ reviewer knows it is reviewing a revision, not a fresh submission.
   - **SQLite DB rows** (`pr_progress`, `created_prs`): `Reap()` must be triggered by the
     closed-PR sweep so the DB stays in sync with the open-PR list.
 
-- [ ] **PR-keyed assets are cleaned up when the PR is closed — one trigger, complete cleanup.**
+- [x] **PR-keyed assets are cleaned up when the PR is closed — one trigger, complete cleanup.**
   On every orchestrator scan cycle, after fetching the open-PR list, the Go program sweeps
   `sweeper-data/pr/<owner>-<repo>/` and deletes any `pr-<N>/` directory whose PR is absent
   from the list. The same sweep triggers `Reap()` for DB rows.
@@ -501,12 +505,13 @@ reviewer knows it is reviewing a revision, not a fresh submission.
   leaves zero resources associated with PR N on the host.**
   **Caveat — GaveUp path:** `GaveUp` does not close the original dependabot PR (only the
   success path closes it). A GaveUp PR stays in the open-PR list; its working directory is
-  not deleted until the PR is manually closed or merged. Known gap — document it.
+  not deleted until the PR is manually closed or merged. Known gap — documented.
+  **Done in 08545ac (`reapClosed` in orchestrator.go; GaveUp caveat in comment).**
 
-- [ ] **Update the web dashboard's log-serving endpoint.** Moving logs under the PR-keyed root
+- [x] **Update the web dashboard's log-serving endpoint.** Moving logs under the PR-keyed root
   requires updating the web API. The web process uses `--log-dir` / `SWEEPER_LOG_DIR`
   (`implementation.go:316`) to serve the agent-log endpoint. Update it to construct the new
-  per-PR log path from the canonical schema.
+  per-PR log path from the canonical schema. **Done in 08545ac (`WithDataDir` in web/server.go).**
 
 - [ ] **Resolve `manualRebase` sequencing vs PR-keyed root.** `manualRebase` creates its own
   `os.MkdirTemp("", "sweeper-rebase-*")` with `defer os.RemoveAll` and runs *before*
@@ -514,10 +519,10 @@ reviewer knows it is reviewing a revision, not a fresh submission.
   calling `manualRebase` (so the rebase can use a subdirectory of it), or keep the rebase temp
   dir as a documented short-lived exception outside the PR root.
 
-- [ ] **Same-package collision is prevented by the staleness gate, not by directory isolation.**
+- [x] **Same-package collision is prevented by the staleness gate, not by directory isolation.**
   `FindNewerPRForPackage` runs in `processPR` Step 1, before any PR reaches the pipeline, so
   only the higher-version PR proceeds. Document this explicitly — directory isolation is the
-  backstop, not the primary defence.
+  backstop, not the primary defence. **Done in 08545ac (comment near `FindNewerPRForPackage`).**
 
 - [ ] **Impl → reviewer brief.** The reviewer is handed the same `<workdir>` as the implementing
   agent. Its brief must include:
@@ -535,13 +540,15 @@ reviewer knows it is reviewing a revision, not a fresh submission.
 Every agent prompt must be reviewed against the Agent Empowerment Principle in `docs/PRINCIPLES.md`.
 Two concrete changes are already known from the audit — these must land as part of this item:
 
-- [ ] **Remove the dead-letter "follow the compare URL" instruction** from `analyser.go:46–47`.
+- [x] **Remove the dead-letter "follow the compare URL" instruction** from `analyser.go:46–47`.
   Remove it entirely — the combined agent fetches what it needs autonomously; no instruction
-  is needed to tell it to do so.
-- [ ] **Remove the epistemic-hedging patch** from `reviewer.go:187–194` ("Do NOT infer the absence
+  is needed to tell it to do so. **Done in 08545ac.**
+- [x] **Remove the epistemic-hedging patch** from `reviewer.go:187–194` ("Do NOT infer the absence
   of any change from this cut-off view; if the visible portion is insufficient to judge, say so").
   After 6.C, the reviewer has Bash access and can run `git diff` itself. Remove the hedge and
   replace with: "Use `git diff` to read the full diff; there is no size cap."
+  **Done: reviewer.go was rewritten entirely; the hedge is gone; the `git diff` instruction is
+  in the new brief's tool section.**
 - [ ] Each prompt explains the agent's role, *why* that role exists, and how it fits the overall
   workflow (the context helps the agent reason about edge cases it wasn't explicitly instructed on).
 - [ ] No prompt contains instructions the agent structurally cannot follow.

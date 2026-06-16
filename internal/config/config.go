@@ -88,7 +88,6 @@ func FromEnv(opts ...Option) (*Config, error) {
 		cfg.BotEmail = "dependabot-helper@users.noreply.github.com"
 	}
 
-
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -165,7 +164,6 @@ func WithCIVerifyMaxWait(v int) Option       { return func(c *Config) { c.CIVeri
 func WithCIStaleness(v time.Duration) Option { return func(c *Config) { c.CIStaleness = v } }
 func WithBotName(v string) Option            { return func(c *Config) { c.BotName = v } }
 func WithBotEmail(v string) Option           { return func(c *Config) { c.BotEmail = v } }
-
 
 // loadDotenv loads a .env file from the current directory, if present.
 // Existing environment variables are not overridden.

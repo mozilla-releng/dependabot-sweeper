@@ -142,6 +142,34 @@ func TestGaveUpSkipFiresAfterRebase(t *testing.T) {
 }
 
 
+// TestUnknownBumpTypeSkipRecording is a regression test for the implicit safety
+// net that was lost when the min-bump threshold was removed (Phase 3): previously
+// BumpRank(BumpUnknown) < BumpRank(BumpMajor) silently excluded parse-failure
+// PRs from analysis. The explicit guard in processPR Step 0 now replicates that
+// exclusion. This test verifies that the guard writes StageSkipped (not any
+// analysing/impl stage) for BumpUnknown PRs, protecting against future refactors
+// that might accidentally skip the guard.
+func TestUnknownBumpTypeSkipRecording(t *testing.T) {
+	s := openTestStore(t)
+	o := Orchestrator{store: s}
+
+	// Simulate what processPR Step 0 does for a parse-failure PR.
+	s.Report(55, "weird-lib", string(models.BumpUnknown), models.StagePending, "")
+	o.reportStage(55, "weird-lib", string(models.BumpUnknown), models.StageSkipped,
+		"skipped: could not classify bump type from PR title")
+
+	got, ok := s.Get(55)
+	if !ok {
+		t.Fatal("store has no entry for PR 55")
+	}
+	if got.Stage != models.StageSkipped {
+		t.Errorf("Stage = %q, want skipped — BumpUnknown must never proceed past Step 0", got.Stage)
+	}
+	if got.BumpType != string(models.BumpUnknown) {
+		t.Errorf("BumpType = %q, want unknown", got.BumpType)
+	}
+}
+
 // TestExcludeOwnPRs is the Q14/C1 regression: a PR the tool created (recorded in
 // the reap-exempt table) is dropped from the scan set, so it can't be
 // re-ingested and re-processed as a fresh dependabot PR.

@@ -288,6 +288,26 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	o.setVersions(pr.Number, pr.OldVersion, pr.NewVersion, pr.Ecosystem, pr.URL)
 	o.setCI(pr.Number, pr.CI)
 
+	// Step 0: Skip PRs whose bump type couldn't be parsed. BumpUnknown means
+	// the title didn't match the dependabot bump pattern — these are not real
+	// dependency upgrades (e.g. empty-commit PRs, reverts, unrelated author
+	// PRs). The accept-author filter is the primary gate; this is a backstop
+	// so unparseable titles never reach the expensive agent.
+	if pr.BumpType == models.BumpUnknown {
+		detail := "skipped: could not classify bump type from PR title"
+		slog.Info("Unknown bump type — skipping", "pr", pr.Number)
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageSkipped, detail)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      models.ActionSkippedPolicy,
+			Detail:      detail,
+			Success:     true,
+		}
+	}
+
 	// Step 1: Staleness. A PR is superseded if a newer INDIVIDUAL PR bumps the
 	// same package higher (existing behaviour), or (Q6) a grouped PR already
 	// covers this package at >= this version. A grouped PR is never closed as

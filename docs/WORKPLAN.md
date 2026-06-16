@@ -351,13 +351,16 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 - [x] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
   URL if the changelog is truncated" — with full tool access the agent fetches what it needs.
   **Done in 08545ac (analyser.go); also done in 6.E below.**
-- [ ] **Do not pre-fetch upstream data for the agent.** The agent brief contains only what the
+- [x] **Do not pre-fetch upstream data for the agent.** The agent brief contains only what the
   agent cannot derive itself: PR metadata (number, title, package, old version, new version)
   and the working environment (working directory, clone path, role). Release notes, changelogs,
   codebase snippets — the agent fetches and searches these autonomously. Pre-seeding upstream
   data, even framed as a "hint", is the same pattern we are eliminating. Remove the
   `GetUpstreamInfo` injection from the combined agent's brief entirely.
-- [ ] **Specify the combined agent's initial brief.** After Phase 3.2 removes the analyser,
+  **Done — `combinedAgentBrief` in `internal/agent/agent.go` contains only PR metadata and
+  working environment. No `GetUpstreamInfo` call on the combined agent path. Verified in
+  Phase 6.A audit.**
+- [x] **Specify the combined agent's initial brief.** After Phase 3.2 removes the analyser,
   `BuildImplementationBrief` (`implementation.go:181–207`) can no longer forward
   `analysis.ReviewBody` / `analysis.CodeChanges` — there is no upstream analyser verdict.
   Define what the combined agent starts from: PR metadata only (number, title, package name,
@@ -365,32 +368,54 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
   role). The agent fetches everything else — diffs, release notes, changelogs — autonomously.
   Define what it is expected to produce (the WHY comment for recommend, or the replacement PR
   body for the fix path).
-- [ ] **Combined agent generates its own comment on the `recommend` path.** The approve-comment
+  **Done — `combinedAgentBrief` in `internal/agent/agent.go` matches the standard brief
+  template from AGENT_PIPELINE_AUDIT.md: working directory, repo clone, bare clone (with
+  explicit "do not modify"), role + why, expected outputs. Verified in Phase 6.A audit.**
+- [x] **Combined agent generates its own comment on the `recommend` path.** The approve-comment
   is currently produced from `analysis.ReviewBody` (`orchestrator.go:670`) — output of the
   tool-less analyser. After Phase 6, the combined agent must author this comment itself. The
   comment is the product; its quality is the whole point of the redesign.
-- [ ] **Clarify the `confidence` field and low-confidence routing.** `actOnAnalysis` gates on
+  **Done — `actOnAgentVerdict` in `orchestrator.go` posts `verdict.RecommendBody` directly
+  (the agent-authored WHY). The `analysis.ReviewBody` path is only used in `actOnAnalysis`
+  which is the legacy analyser path only. Verified in Phase 6.A audit.**
+- [x] **Clarify the `confidence` field and low-confidence routing.** `actOnAnalysis` gates on
   `analysis.Confidence == ConfidenceLow`. With a fully-tooled combined agent, low confidence
   should be rare because the agent can verify directly. Decide whether the `confidence` field
   and its routing survive into the combined agent's output schema, or are replaced by a simpler
   "did the agent reach a verdict?" check.
+  **Decision: `Confidence` and low-confidence routing are NOT in the combined agent's output
+  schema (`AgentVerdict`). The combined agent uses `AgentOutcome` (4-way routing:
+  recommend / needs_changes / flag_human / gave_up). `gave_up` is the "could not reach a
+  verdict" outcome — it replaces the low-confidence flag. The `Confidence` type and
+  `ConfidenceLow` routing survive only in `AgentAnalysis` (the legacy `--legacy-analyser`
+  path). This is the correct design: the combined agent cannot have low confidence because it
+  has full tools to verify directly; if it genuinely cannot verify, it gives `gave_up`, which
+  triggers the silent-draft path rather than a noisy human flag. Verified in Phase 6.A audit.**
 
 ### 6.B — Codebase search: agent-driven, not pre-filtered
 
-- [ ] **Remove the 50-snippet cap as a ceiling.** The agent must be able to search the codebase
+- [x] **Remove the 50-snippet cap as a ceiling.** The agent must be able to search the codebase
   for specific symbol names — not receive a package-name grep capped at 50 lines.
-- [ ] **Remove the fixed file-extension list as a gate.** The agent decides what to search.
-- [ ] **Move codebase search after upstream data ingestion.** The agent reads the changelog first
+  **Done — `codebase.go` deleted entirely (see below). Cap gone with the file.**
+- [x] **Remove the fixed file-extension list as a gate.** The agent decides what to search.
+  **Done — `codebase.go` deleted entirely. Extension list gone with the file.**
+- [x] **Move codebase search after upstream data ingestion.** The agent reads the changelog first
   to identify *which specific symbols changed*, then searches for those symbols by name. The
   current pre-filtered approach greps by package name before the agent knows what changed.
-- [ ] **Remove `codebase.go` entirely once 6.D lands.** The shallow-clone infrastructure in
+  **Done — the combined agent path never called `codebase.AnalyseCodebaseUsage`. The legacy
+  path's call is removed as part of this batch (see below). The agent is autonomous.**
+- [x] **Remove `codebase.go` entirely once 6.D lands.** The shallow-clone infrastructure in
   `codebase.go` existed solely to pre-collect data for the tool-less analyser. After 6.D the
   Go program prepares a full clone for the agent from the bare clone; there is no use for a
   separate shallow clone. Remove the whole module, not just the grep step.
-- [ ] **Remove the `codebase.AnalyseCodebaseUsage` call in the orchestrator.** After Phase 3.2,
+  **Done — `internal/codebase/codebase.go` deleted. No other files in the package.**
+- [x] **Remove the `codebase.AnalyseCodebaseUsage` call in the orchestrator.** After Phase 3.2,
   the combined agent owns the clone; the orchestrator must not call
   `codebase.AnalyseCodebaseUsage` at `processPR` (`orchestrator.go:471`). Remove the call site
   as part of this item — not just the grep logic inside `codebase.go`.
+  **Done — removed from `runLegacyAnalyser` in `orchestrator.go`. Legacy path now passes
+  empty `models.CodebaseUsage{}` to the analyser (the analyser handles empty usage gracefully).
+  `codebase` import removed from orchestrator.go.**
 
 ### 6.C — Reviewer empowerment
 

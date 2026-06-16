@@ -505,16 +505,17 @@ reviewer knows it is reviewing a revision, not a fresh submission.
   `sweeper-data/pr/<owner>-<repo>/pr-<N>/`:
   - **Repo clone** (`<workdir>/repo/`): lives inside the working directory. ✓
   - **Log files**: moved under `<workdir>/` (see above).
-  - **Claude CLI session files**: the pipeline pins `--session-id <UUID>`; the CLI stores
-    session transcripts under `~/.claude/projects/<hash>/` by default — not under `<workdir>`.
-    These accumulate indefinitely. **Prerequisite:** investigate the Claude CLI session storage
-    format before committing to a cleanup mechanism. The path uses a hash of the project
-    context, not the session ID; finding files by session ID may require shell investigation.
-    Either redirect storage into `<workdir>`, or record the session ID in the DB and delete
-    files explicitly during the closed-PR sweep.
-  - **Remote git branches** pushed to GitHub (e.g. `auto/fix/<package>-<version>`): not deleted
-    by the closed-PR sweep. Decide whether remote branch cleanup is in scope for Phase 6 or
-    documented as a known out-of-scope resource.
+  - **Claude CLI session files**: **Investigation complete.** The CLI stores sessions under
+    `~/.claude/projects/<project-dir>/<session-UUID>.jsonl` where `<project-dir>` is the
+    worker CWD with `/` replaced by `-` (e.g. CWD `/foo/bar` → `-foo-bar`). Session UUID is
+    the filename stem — no hash, fully predictable. Cleanup mechanism: on PR close, delete
+    `~/.claude/projects/<cwdPath-with-dashes>/<sessionUUID>.jsonl` and the matching subdir.
+    Both values (session UUID + worker CWD = `<workdir>/repo`) are available at cleanup time.
+    `--no-session-persistence` suppresses writing but blocks resume — not appropriate here.
+    Files run 700 KB–6 MB each. **TODO: implement cleanup in `reapClosed` sweep.**
+  - **Remote git branches** pushed to GitHub (e.g. `auto/fix/<package>-<version>`): not in
+    scope for Phase 6 — the replacement PR's branch is deleted by GitHub when the PR merges
+    or closes. Documenting as known out-of-scope. ✓
   - **SQLite DB rows** (`pr_progress`, `created_prs`): `Reap()` must be triggered by the
     closed-PR sweep so the DB stays in sync with the open-PR list.
 

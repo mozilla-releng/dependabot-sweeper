@@ -7,11 +7,13 @@ the commit/PR.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a maintainer decision first.
 
-> **Status (2026-06-16): Phase 3.2 cluster + Phase 6 (6.A–6.E) fully MERGED to `main`** —
+> **Status (2026-06-16): Phase 3.2 cluster + Phase 6 (6.A–6.F pre-deploy) fully MERGED to `main`** —
 > combined agent, Q8 guard, Q3 silent-draft, Q13 curate, Q15 justification, Phase 6 quick wins
-> (6.A/6.C/6.D/6.E open items), Phase 6.B (codebase.go removed). Build/test/staticcheck green.
+> (6.A/6.C/6.D/6.E open items), Phase 6.B (codebase.go removed), Claude session cleanup in
+> reapClosed. Build/test/staticcheck green.
+> **Next: deploy (`e2`), resync fork (`e1`), run Phase 6.F mdi-react regression test.**
 > **E2e verification against the live test bed is still pending** (required before claiming
-> Phase 3.2 fully done per WORKPLAN). Phase 6.F (mdi-react regression test) is next.
+> Phase 3.2 fully done per WORKPLAN).
 >
 > Still open: **Phase 4** (UI, needs a browser session). See `docs/questions.md` for the two
 > maintainer decisions.
@@ -500,24 +502,21 @@ reviewer knows it is reviewing a revision, not a fresh submission.
   `<workdir>/` so they are removed when the working directory is deleted on PR close. This
   closes both the collision problem and the disk growth problem. **Done in 08545ac.**
 
-- [ ] **All per-PR resources live under one PR-keyed root — nothing hidden outside it.**
+- [x] **All per-PR resources live under one PR-keyed root — nothing hidden outside it.**
   Every resource the Go program creates for a PR must live under
   `sweeper-data/pr/<owner>-<repo>/pr-<N>/`:
   - **Repo clone** (`<workdir>/repo/`): lives inside the working directory. ✓
-  - **Log files**: moved under `<workdir>/` (see above).
-  - **Claude CLI session files**: **Investigation complete.** The CLI stores sessions under
+  - **Log files**: moved under `<workdir>/` (see above). ✓
+  - **Claude CLI session files**: The CLI stores sessions under
     `~/.claude/projects/<project-dir>/<session-UUID>.jsonl` where `<project-dir>` is the
-    worker CWD with `/` replaced by `-` (e.g. CWD `/foo/bar` → `-foo-bar`). Session UUID is
-    the filename stem — no hash, fully predictable. Cleanup mechanism: on PR close, delete
-    `~/.claude/projects/<cwdPath-with-dashes>/<sessionUUID>.jsonl` and the matching subdir.
-    Both values (session UUID + worker CWD = `<workdir>/repo`) are available at cleanup time.
-    `--no-session-persistence` suppresses writing but blocks resume — not appropriate here.
-    Files run 700 KB–6 MB each. **TODO: implement cleanup in `reapClosed` sweep.**
+    worker CWD (`<workdir>/repo`) with `/` replaced by `-`. `reapClosed` now deletes
+    `~/.claude/projects/<cwdPath-with-dashes>/` (the whole per-CWD directory) before
+    removing the workdir. Files run 700 KB–6 MB each; cleanup prevents unbounded growth. ✓
   - **Remote git branches** pushed to GitHub (e.g. `auto/fix/<package>-<version>`): not in
     scope for Phase 6 — the replacement PR's branch is deleted by GitHub when the PR merges
-    or closes. Documenting as known out-of-scope. ✓
-  - **SQLite DB rows** (`pr_progress`, `created_prs`): `Reap()` must be triggered by the
-    closed-PR sweep so the DB stays in sync with the open-PR list.
+    or closes. Out-of-scope. ✓
+  - **SQLite DB rows** (`pr_progress`, `created_prs`): `Reap()` triggered by the
+    closed-PR sweep. ✓
 
 - [x] **PR-keyed assets are cleaned up when the PR is closed — one trigger, complete cleanup.**
   On every orchestrator scan cycle, after fetching the open-PR list, the Go program sweeps

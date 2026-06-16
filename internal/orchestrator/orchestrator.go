@@ -153,6 +153,18 @@ func (o *Orchestrator) reapClosed(open []models.DependabotPR) {
 			}
 			if !openSet[prNum] {
 				dir := filepath.Join(prDir, e.Name())
+				// Clean up Claude CLI session files before removing the workdir.
+				// The CLI stores sessions at ~/.claude/projects/<cwd-with-dashes>/ where
+				// <cwd-with-dashes> is the agent CWD (workdir/repo) with "/" replaced by "-".
+				// Since the path starts with "/", the key starts with "-".
+				if home, err := os.UserHomeDir(); err == nil {
+					repoDir := filepath.Join(dir, "repo")
+					sessionKey := strings.ReplaceAll(repoDir, "/", "-")
+					sessionDir := filepath.Join(home, ".claude", "projects", sessionKey)
+					if err := os.RemoveAll(sessionDir); err != nil {
+						slog.Warn("could not remove Claude session dir", "pr", prNum, "path", sessionDir, "error", err)
+					}
+				}
 				slog.Info("Removing closed-PR workdir", "pr", prNum, "path", dir)
 				if err := os.RemoveAll(dir); err != nil {
 					slog.Warn("could not remove closed-PR workdir", "pr", prNum, "path", dir, "error", err)

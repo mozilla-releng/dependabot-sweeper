@@ -259,10 +259,9 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
 - [ ] The `codebase.AnalyseCodebaseUsage` call in `orchestrator.go:471` is removed
 
 ### Stage 3 (upstream info)
-- [ ] The combined agent is invoked with a tool configuration that explicitly includes WebFetch,
-  Bash, and Read — verifiable by inspecting the `workerCommand`-equivalent function for the
-  combined agent and confirming these tools are not excluded by `--bare` or a restrictive
-  allowlist
+- [ ] The combined agent is invoked with `--dangerously-skip-permissions` — no tool enumeration
+  or allowlist; the agent uses whatever it needs (verifiable by inspecting the
+  `workerCommand`-equivalent function); `--bare` confirmed not to suppress built-in tools
 - [ ] The dead-letter "follow the compare URL if the changelog is truncated" instruction in
   `analyser.go:46–47` is replaced with a real WebFetch tool access instruction
 - [ ] The agent brief contains an explicit hint-framing clause ("this data was pre-fetched; use
@@ -273,13 +272,13 @@ Use this checklist when reviewing Phase 6 implementation to confirm all findings
 
 ### Stage 4 (analyser)
 - [ ] The analyser no longer exists as a tool-less `Messages.New` call
-- [ ] The combined agent (post-Phase 3.2) has at minimum Bash, Read, and WebFetch tools
-- [ ] The combined agent runs in a checked-out repo directory
+- [ ] The combined agent (post-Phase 3.2) runs with `--dangerously-skip-permissions` in a
+  checked-out repo directory — fully autonomous, no tool restrictions
 
 ### Stage 6 (reviewer)
-- [ ] The reviewer runs as a `claude` subprocess with `proc.Dir` set to the repo directory and
-  at least Bash and Read in its tool configuration, matching the `runWorkerTurn` pattern
-- [ ] The reviewer can run `git diff bumpTip..HEAD` itself (no size cap)
+- [ ] The reviewer runs as a `claude` subprocess with `--dangerously-skip-permissions` and
+  `proc.Dir` set to the repo directory, matching the `runWorkerTurn` pattern — not a
+  tool-less `Messages.New` call
 - [ ] The epistemic-hedging instruction at `reviewer.go:187–194` ("Do NOT infer the absence of
   any change from this cut-off view") is removed from the prompt
 

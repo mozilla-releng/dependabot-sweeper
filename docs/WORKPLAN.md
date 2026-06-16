@@ -339,29 +339,26 @@ process the mdi-react 6.7.0→9.4.0 bump (upstream `taskcluster/taskcluster#6753
 the redesigned agent. The output must show verified facts about icon renames — not estimates.
 See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 
-### 6.A — Combined agent: tools and autonomous information gathering
+### 6.A — Combined agent: full tool access and autonomous information gathering
 
-- [ ] **Give the combined agent WebFetch tools** so it can follow compare URLs, fetch migration
-  guides, and read full changelogs when the pre-fetched summary is insufficient or truncated.
-- [ ] **Give the combined agent Bash + Read tools in a checked-out repo** (the implementation
-  agent already has this — the combined agent must inherit it, not regress to the tool-less
-  analyser model).
+- [ ] **Run the combined agent with `--dangerously-skip-permissions`**, the same way the
+  implementation agent already runs (`implementation.go:1057`). Do not enumerate or restrict
+  individual tools — the agent is autonomous and uses whatever it needs. The current worker
+  already has this right; the combined agent must not regress to the tool-less analyser model.
+- [ ] **Verify `--bare` does not suppress built-in tools.** The worker command includes `--bare`
+  (comment: "no hooks/skills/plugins"). This disables hooks, skills, and plugins — not built-in
+  tools like WebFetch or Bash, which are likely unaffected. Confirm before implementation; if
+  `--bare` does suppress built-in tools, remove it from the combined agent invocation.
 - [ ] **Remove the dead-letter prompt instruction** that tells the analyser to "follow the compare
-  URL if the changelog is truncated" — replace it with actual tool access to do so.
+  URL if the changelog is truncated" — with full tool access the agent can do this itself.
 - [ ] **Reframe pre-fetched upstream data as a hint, not the ceiling.** The orchestrator may still
   pre-fetch release data for performance (saves the agent a round-trip on the happy path), but
   the agent brief must make clear: "this is what we found quickly; if it is insufficient, fetch
   more."
 - [ ] **Add the explicit hint-framing clause to the combined agent's brief.** The brief must
   contain a clause such as: *"The following release data was pre-fetched as a performance
-  shortcut; if it is insufficient, incomplete, or truncated, use your WebFetch tool to retrieve
-  more."* This is a concrete prompt change, not covered by the general 6.E review instruction.
-- [ ] **CRITICAL — verify `--bare` does not suppress WebFetch.** The current worker command
-  includes `--bare` (`implementation.go:1057`). If `--bare` suppresses built-in tools like
-  WebFetch in the Claude CLI, the combined agent will be tool-less in practice despite the
-  intent of this item. Verify before writing any 6.A code. If `--bare` suppresses WebFetch or
-  Bash, remove `--bare` from the combined agent invocation or replace it with an explicit
-  allowlist that includes WebFetch, Bash, and Read.
+  shortcut; if it is insufficient, incomplete, or truncated, fetch more directly."* This is a
+  concrete prompt change, not covered by the general 6.E review instruction.
 - [ ] **Specify the combined agent's initial brief.** After Phase 3.2 removes the analyser,
   `BuildImplementationBrief` (`implementation.go:181–207`) can no longer forward
   `analysis.ReviewBody` / `analysis.CodeChanges` — there is no upstream analyser verdict.
@@ -401,13 +398,12 @@ See verification checklist in `docs/AGENT_PIPELINE_AUDIT.md`.
 and has no dependency on the analyser-removal cluster. Implement this before or in parallel
 with Phase 3.2.
 
-- [ ] **Run the reviewer as a `claude` subprocess with `proc.Dir` set to the repo directory**,
-  matching the `runWorkerTurn` pattern (not a bare `Messages.New` call).
-- [ ] **Give the reviewer Bash + Read tools** so it can run `git diff bumpTip..HEAD` itself
-  (no size cap), read test files directly to verify they weren't weakened, and check coverage.
+- [ ] **Run the reviewer as a `claude` subprocess with `--dangerously-skip-permissions` and
+  `proc.Dir` set to the repo directory**, matching the `runWorkerTurn` pattern (not a bare
+  `Messages.New` call). Do not enumerate individual tools — the reviewer is autonomous.
 - [ ] **Remove the epistemic-hedging patch** from the reviewer prompt ("do not infer the absence
-  of changes from the cut-off view") — this is the wrong fix. With tool access the reviewer
-  can check directly.
+  of changes from the cut-off view") — this is the wrong fix. With full tool access the
+  reviewer can run `git diff` itself; there is no size cap and no need to hedge.
 
 ### 6.D — Repo checkout, shared state, and directory lifecycle
 

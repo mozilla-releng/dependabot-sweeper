@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mozilla-releng/dependabot-sweeper/internal/agent"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/analyser"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/codebase"
 	"github.com/mozilla-releng/dependabot-sweeper/internal/config"
@@ -23,17 +24,19 @@ import (
 
 // Orchestrator processes dependabot PRs with bounded concurrency (config.Concurrency).
 type Orchestrator struct {
-	config        *config.Config
-	repo          string
-	dryRun        bool
-	verbose       bool
-	reviewers     []string
-	onlyPR        int // 0 means process all
-	github        *ghclient.Client
-	analyser      *analyser.Analyser
-	store         progress.ReadWriter // optional; nil for the one-shot `review` command
-	logDir        string              // forwarded to each implementation pipeline
-	bareClonePath string              // set by Run() after ensureBareClone; forwarded to each pipeline
+	config         *config.Config
+	repo           string
+	dryRun         bool
+	verbose        bool
+	reviewers      []string
+	onlyPR         int // 0 means process all
+	github         *ghclient.Client
+	combinedAgent  *agent.CombinedAgent
+	analyser       *analyser.Analyser     // legacy path only (--legacy-analyser)
+	legacyAnalyser bool                   // when true, use the old analyser instead of combinedAgent
+	store          progress.ReadWriter    // optional; nil for the one-shot `review` command
+	logDir         string                 // forwarded to each implementation pipeline
+	bareClonePath  string                 // set by Run() after ensureBareClone; forwarded to each pipeline
 }
 
 // New creates an Orchestrator for the given repository. acceptAuthors are
@@ -53,15 +56,24 @@ func New(
 	}
 
 	return &Orchestrator{
-		config:    cfg,
-		repo:      repo,
-		dryRun:    dryRun,
-		verbose:   verbose,
-		reviewers: reviewers,
-		onlyPR:    onlyPR,
-		github:    gh,
-		analyser:  analyser.NewAnalyser(cfg.AnthropicAPIKey, cfg.AnalyserModel, cfg.AnalyserThinkingBudget, verbose),
+		config:        cfg,
+		repo:          repo,
+		dryRun:        dryRun,
+		verbose:       verbose,
+		reviewers:     reviewers,
+		onlyPR:        onlyPR,
+		github:        gh,
+		combinedAgent: agent.NewCombinedAgent(cfg.CombinedAgentModel, cfg.CombinedAgentBudget),
+		analyser:      analyser.NewAnalyser(cfg.AnthropicAPIKey, cfg.AnalyserModel, cfg.AnalyserThinkingBudget, verbose),
 	}, nil
+}
+
+// WithLegacyAnalyser enables the pre-Q10 two-step path: the separate tool-less
+// analyser runs first, then actOnAnalysis routes. This is the Q10 rollback flag.
+// The default (false) uses the combined agent (Q10 path).
+func (o *Orchestrator) WithLegacyAnalyser(v bool) *Orchestrator {
+	o.legacyAnalyser = v
+	return o
 }
 
 // WithStore attaches a live progress store. Used by the daemon subcommands; the
@@ -515,6 +527,17 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		}
 	}
 
+	// Q10 path: combined analysis+decision agent, or legacy two-step analyser.
+	if o.legacyAnalyser {
+		return o.runLegacyAnalyser(ctx, pr)
+	}
+	return o.runCombinedAgent(ctx, pr)
+}
+
+// runLegacyAnalyser is the pre-Q10 path: pre-fetch upstream data + codebase usage,
+// call the tool-less analyser, route on its recommendation. Kept behind
+// --legacy-analyser for rollback. New code should use runCombinedAgent.
+func (o *Orchestrator) runLegacyAnalyser(ctx context.Context, pr models.DependabotPR) models.ReviewResult {
 	// Steps 4-5: per-package upstream info + codebase usage. These don't apply
 	// to a grouped update (no single package), so skip them for groups — the
 	// analyser works off the combined diff and the member list instead.
@@ -532,10 +555,7 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		usage = u
 	}
 
-	// Step 6: Fetch failing-CI logs (best-effort) so the analyser sees
-	// actual error output rather than just check names. Gate on the presence of
-	// failing checks, not the aggregate CI.State (which is diagnostics-only): a
-	// settled PR can carry failures while State is not "failure".
+	// Step 6: Fetch failing-CI logs (best-effort).
 	var failureLogs map[string]string
 	if len(pr.CI.Failures) > 0 {
 		slog.Info("Fetching failing-CI logs", "pr", pr.Number, "checks", len(pr.CI.Failures))
@@ -543,24 +563,18 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	}
 
 	// Step 7: Claude analysis
-	slog.Info("Running Claude analysis", "pr", pr.Number)
+	slog.Info("Running Claude analysis (legacy analyser)", "pr", pr.Number)
 	o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageAnalysing, "")
 	analysis, err := o.analyser.Analyse(ctx, pr, upstream, usage, failureLogs)
 	if err != nil {
 		slog.Error("Analysis failed", "pr", pr.Number, "error", err)
 		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageError, fmt.Sprintf("analysis failed: %s", err))
-		// Flag rather than drop: a PR that errors during analysis should appear
-		// in the summary as flagged-for-human so it is visible, not silently
-		// lost (Bug #16 fallback).
 		if !o.dryRun {
 			if cerr := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA,
 				fmt.Sprintf("Automated analysis could not complete.\n\n**Reason:** %s\n\n_Automated review._", err)); cerr != nil {
 				slog.Warn("failed to post analysis-error comment", "pr", pr.Number, "error", cerr)
 			}
 		}
-		// Sticky: record outcome so the next cycle skips without re-running the
-		// analyser (Bug #26). The PR is re-tried automatically if dependabot
-		// pushes a new commit (new head SHA).
 		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
 		return models.ReviewResult{
 			PRNumber:    pr.Number,
@@ -573,12 +587,121 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		}
 	}
 
-	// Record the analyser verdict before routing so the drawer shows it for
-	// PRs that are approved/flagged without entering the implementation path.
 	o.setAnalysis(pr.Number, *analysis)
-
-	// Step 7: Validate and act
 	return o.actOnAnalysis(ctx, pr, analysis)
+}
+
+// runCombinedAgent is the Q10 path: a single agentic step analyses upstream +
+// codebase impact and decides the outcome. No pre-fetching of upstream data.
+// The combined agent runs with full tool access (--dangerously-skip-permissions).
+func (o *Orchestrator) runCombinedAgent(ctx context.Context, pr models.DependabotPR) models.ReviewResult {
+	// Determine the per-PR working directory. The orchestrator prepares it here
+	// so the combined agent and the implementation pipeline (if needed) share it.
+	workdir, repoDir, err := o.prepareAgentWorkdir(ctx, pr)
+	if err != nil {
+		slog.Error("Failed to prepare agent workdir", "pr", pr.Number, "error", err)
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageError, fmt.Sprintf("workdir setup failed: %s", err))
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      models.ActionFlaggedForHuman,
+			Detail:      fmt.Sprintf("Workdir setup failed: %s", err),
+			Success:     true,
+		}
+	}
+
+	// Log path co-located with the workdir so reapClosed cleans it up automatically.
+	logPath := filepath.Join(workdir, fmt.Sprintf("pr-%d-agent.jsonl", pr.Number))
+
+	slog.Info("Running combined agent", "pr", pr.Number, "workdir", workdir)
+	o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageAnalysing, "")
+	verdict, err := o.combinedAgent.Analyse(ctx, pr, workdir, repoDir, o.bareClonePath, o.github.RepoFullName(), logPath)
+	if err != nil {
+		slog.Error("Combined agent failed", "pr", pr.Number, "error", err)
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageError, fmt.Sprintf("combined agent failed: %s", err))
+		// No GitHub comment — the agent itself may have posted partial work.
+		// Record as flagged so next cycle skips without re-spinning the agent.
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      models.ActionFlaggedForHuman,
+			Detail:      fmt.Sprintf("Combined agent failed: %s", err),
+			Success:     true,
+		}
+	}
+
+	return o.actOnAgentVerdict(ctx, pr, verdict, workdir, repoDir)
+}
+
+// prepareAgentWorkdir creates the canonical per-PR working directory and clones
+// the repo into it. Returns (workdir, repoDir, error). If DataDir is set, the
+// workdir is stable across cycles: <DataDir>/pr/<owner-repo>/pr-<N>/. Otherwise
+// falls back to os.MkdirTemp.
+func (o *Orchestrator) prepareAgentWorkdir(ctx context.Context, pr models.DependabotPR) (workdir, repoDir string, err error) {
+	if o.config.DataDir != "" {
+		slug := strings.ReplaceAll(o.repo, "/", "-")
+		workdir = filepath.Join(o.config.DataDir, "pr", slug, fmt.Sprintf("pr-%d", pr.Number))
+		// Remove stale workdir from a prior crash, then recreate.
+		if info, serr := os.Stat(workdir); serr == nil && info.IsDir() {
+			slog.Info("Removing stale agent workdir (crash residue)", "path", workdir)
+			if rerr := os.RemoveAll(workdir); rerr != nil {
+				return "", "", fmt.Errorf("removing stale workdir %s: %w", workdir, rerr)
+			}
+		}
+		if merr := os.MkdirAll(workdir, 0o755); merr != nil {
+			return "", "", fmt.Errorf("creating agent workdir %s: %w", workdir, merr)
+		}
+	} else {
+		workdir, err = os.MkdirTemp("", "sweeper-agent-*")
+		if err != nil {
+			return "", "", fmt.Errorf("creating temp agent workdir: %w", err)
+		}
+	}
+
+	repoDir = filepath.Join(workdir, "repo")
+
+	// Clone the repo. Use the local bare clone if available; fall back to GitHub.
+	var cloneArgs []string
+	if o.bareClonePath != "" {
+		cloneArgs = []string{"git", "clone", "--local", "--no-checkout", o.bareClonePath, repoDir}
+	} else {
+		tokenlessURL := fmt.Sprintf("https://github.com/%s.git", o.repo)
+		cloneArgs = []string{
+			"git",
+			"-c", "credential.helper=",
+			"-c", fmt.Sprintf("credential.helper=!f() { echo username=x-access-token; echo \"password=%s\"; }; f", o.config.GitHubToken),
+			"clone", "--no-checkout", "--filter=blob:none", tokenlessURL, repoDir,
+		}
+	}
+	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	cloneCmd := exec.CommandContext(cloneCtx, cloneArgs[0], cloneArgs[1:]...)
+	if out, cerr := cloneCmd.CombinedOutput(); cerr != nil {
+		return "", "", fmt.Errorf("git clone for agent workdir failed: %w\n%s", cerr, out)
+	}
+
+	// Checkout the PR's head ref so the agent sees the actual PR content.
+	fetchCtx, cancel2 := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel2()
+	fetchArgs := []string{"git", "-C", repoDir, "fetch", "origin",
+		fmt.Sprintf("refs/pull/%d/head:refs/remotes/origin/pr-%d", pr.Number, pr.Number)}
+	if out, ferr := exec.CommandContext(fetchCtx, fetchArgs[0], fetchArgs[1:]...).CombinedOutput(); ferr != nil {
+		slog.Warn("fetch PR head failed — agent will work off default branch", "pr", pr.Number, "error", ferr, "output", string(out))
+	} else {
+		checkoutArgs := []string{"git", "-C", repoDir, "checkout", "-b", pr.HeadRef,
+			fmt.Sprintf("refs/remotes/origin/pr-%d", pr.Number)}
+		if out, coerr := exec.Command(checkoutArgs[0], checkoutArgs[1:]...).CombinedOutput(); coerr != nil {
+			slog.Warn("checkout PR branch failed — agent will work off default branch", "pr", pr.Number, "error", coerr, "output", string(out))
+		}
+	}
+
+	return workdir, repoDir, nil
 }
 
 // suppressedChecks returns the two sets of CI checks that should not block the
@@ -808,138 +931,7 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 			pipeline.WithBareClone(o.bareClonePath)
 		}
 		result := pipeline.Run(ctx, pr, analysis)
-
-		// Check if agent created a PR
-		var replacementNumber int
-		var hasReplacement bool
-		if result.Branch != "" {
-			var findErr error
-			replacementNumber, hasReplacement, findErr = o.github.FindPRByBranch(ctx, result.Branch)
-			if findErr != nil {
-				slog.Warn("failed to look up replacement PR", "branch", result.Branch, "error", findErr)
-			}
-		}
-
-		if result.Success && hasReplacement {
-			slog.Info("Implementation agent created PR, finalising",
-				"pr", pr.Number, "replacement", replacementNumber)
-
-			// Name the sweeper PR distinctly: the dependabot title with the
-			// conventional-commit type swapped to `fix` (Q14), not a verbatim copy
-			// of the dependabot title — which made the two indistinguishable.
-			if err := o.github.UpdatePRTitle(ctx, replacementNumber, implementation.SweeperPRTitle(pr.Title)); err != nil {
-				slog.Warn("failed to update replacement PR title", "pr", replacementNumber, "error", err)
-			}
-			if err := o.github.MarkPRReadyForReview(ctx, replacementNumber); err != nil {
-				slog.Warn("failed to mark replacement PR ready", "pr", replacementNumber, "error", err)
-			}
-			if err := o.github.ClosePRWithComment(ctx, pr.Number,
-				fmt.Sprintf("Replaced by #%d which includes the necessary code changes "+
-					"for this dependency upgrade.\n\n_Automated review._", replacementNumber)); err != nil {
-				slog.Warn("failed to close original PR", "pr", pr.Number, "error", err)
-			}
-
-			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, result.Detail)
-			o.reportReplacement(pr.Number, replacementNumber, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, replacementNumber))
-			o.recordCreatedPR(replacementNumber, pr.Number) // exclude our own PR from future scans (Q14)
-			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
-			return models.ReviewResult{
-				PRNumber:            pr.Number,
-				PackageName:         pr.PackageName,
-				OldVersion:          pr.OldVersion,
-				NewVersion:          pr.NewVersion,
-				Action:              models.ActionReplacementPR,
-				Detail:              result.Detail,
-				ReplacementPRNumber: &replacementNumber,
-				Success:             true,
-			}
-		} else if result.Success && !hasReplacement {
-			slog.Warn("Implementation succeeded but no PR found", "pr", pr.Number, "branch", result.Branch)
-			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, "implementation completed but no PR was created")
-			// Sticky: record outcome so the next cycle skips (Bug #26).
-			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
-			return models.ReviewResult{
-				PRNumber:    pr.Number,
-				PackageName: pr.PackageName,
-				OldVersion:  pr.OldVersion,
-				NewVersion:  pr.NewVersion,
-				Action:      models.ActionFlaggedForHuman,
-				Detail:      fmt.Sprintf("Implementation completed but no PR was created on branch %s", result.Branch),
-				Success:     true,
-			}
-		} else {
-			// Pipeline failed.
-			//
-			// Two sub-cases:
-			//   GaveUp == true  → deterministic give-up (no-progress / exhausted / time-cap).
-			//                     Record as sticky outcome at this SHA so the next cycle skips
-			//                     without re-spinning. Stage: gave_up.
-			//   GaveUp == false → transient / retriable failure (worker crash, rebase error, …).
-			//                     Pass "" SHA so the next run retries. Stage: flagged_human.
-
-			var fb strings.Builder
-			if result.GaveUp {
-				// One-line, high-confidence signal per Principle (conciseness).
-				fmt.Fprintf(&fb, "%s\n\n_Automated review._", result.Detail)
-			} else {
-				fmt.Fprintf(&fb, "Automated implementation attempted but did not complete.\n\n**Reason:** %s\n\n", result.Detail)
-				if result.ReviewVerdict != nil && len(result.ReviewVerdict.Concerns) > 0 {
-					fb.WriteString("**Review concerns:**\n")
-					for _, c := range result.ReviewVerdict.Concerns {
-						fmt.Fprintf(&fb, "- %s\n", c)
-					}
-					fb.WriteString("\n")
-				}
-				if result.Branch != "" {
-					fmt.Fprintf(&fb, "Branch `%s` contains the partial work.\n\n", result.Branch)
-				}
-				fb.WriteString("_Automated review._")
-			}
-
-			// Close any rogue PR regardless of give-up status.
-			if hasReplacement {
-				if err := o.github.ClosePRWithComment(ctx, replacementNumber,
-					fmt.Sprintf("Closing — automated implementation did not complete successfully.\n\n%s", result.Detail)); err != nil {
-					slog.Warn("failed to close rogue replacement PR", "pr", replacementNumber, "error", err)
-				}
-			}
-
-			if result.GaveUp {
-				// Sticky: record the outcome at the *post-rebase* branch tip
-				// (result.TipSHA), NOT the scan-time pr.HeadSHA. A Phase-0 rebase
-				// rewrites the branch head, so the scan-time SHA is stale; recording
-				// there would make next cycle's SHA-skip miss and re-enter the
-				// expensive agent (N4 / MAJOR-1). Both the DB outcome and the sticky
-				// comment's SHA marker (the nil-store skip key) use this SHA. Other
-				// recordOutcome calls stay on pr.HeadSHA — they are pre-rebase
-				// analysis flags or finalize (original closed, never re-scanned).
-				giveUpSHA := terminalSHA(result.TipSHA, pr.HeadSHA)
-				if err := o.github.UpsertStatusComment(ctx, pr.Number, giveUpSHA, fb.String()); err != nil {
-					slog.Warn("failed to upsert give-up comment", "pr", pr.Number, "error", err)
-				}
-				o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageGaveUp, result.Detail)
-				o.recordOutcome(pr.Number, giveUpSHA, models.StageGaveUp)
-			} else {
-				// Sticky: use pr.HeadSHA so the next cycle skips without re-launching
-				// the analyser/impl/reviewer (Bug #26). The PR is retried automatically
-				// when dependabot pushes a new commit (new head SHA).
-				if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, fb.String()); err != nil {
-					slog.Warn("failed to upsert failure comment", "pr", pr.Number, "error", err)
-				}
-				o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, result.Detail)
-				o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
-			}
-
-			return models.ReviewResult{
-				PRNumber:    pr.Number,
-				PackageName: pr.PackageName,
-				OldVersion:  pr.OldVersion,
-				NewVersion:  pr.NewVersion,
-				Action:      models.ActionFlaggedForHuman,
-				Detail:      result.Detail,
-				Success:     true,
-			}
-		}
+		return o.handlePipelineResult(ctx, pr, result)
 	}
 
 	// Should not reach here
@@ -951,6 +943,309 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 		Action:      models.ActionError,
 		Detail:      fmt.Sprintf("Unexpected recommendation: %s", analysis.Recommendation),
 		Success:     false,
+	}
+}
+
+// actOnAgentVerdict routes the combined agent's verdict:
+//   - recommend: re-gate on a fresh required-CI read; post the recommend_body; approve.
+//   - needs_changes: invoke the implementation pipeline.
+//   - flag_human: post the concise flag_reason; record flagged.
+//   - gave_up: silent draft; record gave_up at scan-time head SHA (no comment posted).
+func (o *Orchestrator) actOnAgentVerdict(
+	ctx context.Context,
+	pr models.DependabotPR,
+	verdict *models.AgentVerdict,
+	workdir, repoDir string,
+) models.ReviewResult {
+	switch verdict.Outcome {
+
+	case models.AgentOutcomeRecommend:
+		// Mechanical re-gate (Q4/C3): the agent's self-reported "CI is green" is not
+		// trusted. Re-read CI from GitHub right now using only the required-status-checks
+		// set. If not acceptable, flag instead of approving — this is the programmatic
+		// enforce of "approve only when CI is already green."
+		slog.Info("Agent recommends merge — re-gating on required CI", "pr", pr.Number)
+		required := o.github.RequiredChecks(ctx, pr.BaseRef)
+		ignoredForGate := make(map[string]bool, len(o.config.IgnoreChecks))
+		for _, name := range o.config.IgnoreChecks {
+			ignoredForGate[name] = true
+		}
+		// No base-failure suppression here: the Q3 decision says genuine green is the bar.
+		acceptable, blocking := pr.CI.AcceptableGiven(ignoredForGate, nil, required, time.Now(), o.config.CIStaleness)
+		if !acceptable {
+			slog.Info("Agent recommended merge but required CI not acceptable — flagging", "pr", pr.Number, "blocking", blocking)
+			reason := fmt.Sprintf("Agent recommended merge but required CI checks are not yet acceptable (%s). "+
+				"Will re-evaluate when CI settles.", strings.Join(blocking, ", "))
+			if !o.dryRun {
+				if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, reason); err != nil {
+					slog.Warn("failed to post CI-not-acceptable comment", "pr", pr.Number, "error", err)
+				}
+			}
+			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, "recommend re-gate: required CI not acceptable")
+			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+			return models.ReviewResult{
+				PRNumber:    pr.Number,
+				PackageName: pr.PackageName,
+				OldVersion:  pr.OldVersion,
+				NewVersion:  pr.NewVersion,
+				Action:      models.ActionFlaggedForHuman,
+				Detail:      "Agent recommended merge but required CI not acceptable — will retry",
+				Success:     true,
+			}
+		}
+
+		slog.Info("Recommending merge", "pr", pr.Number)
+		if !o.dryRun {
+			if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, verdict.RecommendBody); err != nil {
+				slog.Warn("failed to upsert recommendation comment", "pr", pr.Number, "error", err)
+			}
+		}
+		action := models.ActionApproved
+		if o.dryRun {
+			action = models.ActionDryRun
+		}
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageApproved, "recommended for merge")
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageApproved)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      action,
+			Detail:      "Recommended for merge — agent verified no code change needed",
+			Success:     true,
+		}
+
+	case models.AgentOutcomeFlagHuman:
+		slog.Info("Agent flagged for human", "pr", pr.Number, "reason", verdict.FlagReason)
+		// Post only the concise reason — never a review_body dump (Q10/T8/T4).
+		if !o.dryRun {
+			if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, verdict.FlagReason+"\n\n_Automated review._"); err != nil {
+				slog.Warn("failed to post flag-human comment", "pr", pr.Number, "error", err)
+			}
+		}
+		action := models.ActionFlaggedForHuman
+		if o.dryRun {
+			action = models.ActionDryRun
+		}
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, verdict.FlagReason)
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      action,
+			Detail:      "Agent flagged for human: " + verdict.FlagReason,
+			Success:     true,
+		}
+
+	case models.AgentOutcomeGaveUp:
+		// Silent draft (Q3): record gave_up at the scan-time head SHA, no comment.
+		// The implementation pipeline is NOT invoked — the agent gave up before deciding
+		// on changes. Next cycle's SHA-skip fires before any new agent run.
+		slog.Info("Agent gave up — silent outcome", "pr", pr.Number)
+		action := models.ActionFlaggedForHuman
+		if o.dryRun {
+			action = models.ActionDryRun
+		}
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageGaveUp, "agent gave up — silent draft")
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageGaveUp)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      action,
+			Detail:      "Agent gave up — silent outcome recorded",
+			Success:     true,
+		}
+
+	case models.AgentOutcomeNeedsChanges:
+		slog.Info("Agent identified code changes needed — launching implementation pipeline", "pr", pr.Number)
+
+		if o.dryRun {
+			return models.ReviewResult{
+				PRNumber:    pr.Number,
+				PackageName: pr.PackageName,
+				OldVersion:  pr.OldVersion,
+				NewVersion:  pr.NewVersion,
+				Action:      models.ActionDryRun,
+				Detail:      "Would run implementation pipeline (agent identified code changes needed)",
+				Success:     true,
+			}
+		}
+
+		// Idempotency: if a replacement PR is already open for this branch, skip
+		// the pipeline — the prior run succeeded and we don't want to re-run the
+		// agent on an already-complete PR (Bug #19).
+		expectedBranch := implementation.BuildBranchName(pr.PackageName, pr.NewVersion)
+		if existingN, exists, err := o.github.FindPRByBranch(ctx, expectedBranch); err != nil {
+			slog.Warn("could not check for existing replacement PR", "pr", pr.Number, "error", err)
+		} else if exists {
+			slog.Info("replacement PR already exists — skipping pipeline", "pr", pr.Number, "replacement", existingN)
+			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, fmt.Sprintf("replacement PR #%d already exists", existingN))
+			o.reportReplacement(pr.Number, existingN, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, existingN))
+			o.recordCreatedPR(existingN, pr.Number)
+			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
+			return models.ReviewResult{
+				PRNumber:            pr.Number,
+				PackageName:         pr.PackageName,
+				OldVersion:          pr.OldVersion,
+				NewVersion:          pr.NewVersion,
+				Action:              models.ActionReplacementPR,
+				Detail:              fmt.Sprintf("Replacement PR #%d already exists", existingN),
+				ReplacementPRNumber: &existingN,
+				Success:             true,
+			}
+		}
+
+		pipeline := implementation.NewPipeline(o.config, o.github)
+		if o.store != nil {
+			pipeline.WithStore(o.store)
+		}
+		if o.logDir != "" {
+			pipeline.WithLogDir(o.logDir)
+		}
+		if o.bareClonePath != "" {
+			pipeline.WithBareClone(o.bareClonePath)
+		}
+		// Pass the already-prepared workdir so the pipeline can skip re-cloning.
+		if workdir != "" {
+			pipeline.WithWorkdir(workdir)
+		}
+
+		// For the combined agent path, the implementation brief is seeded from the
+		// agent's justification (not an analyser review_body). Wrap the justification
+		// in an AgentAnalysis shell for backward compat with the existing brief builders.
+		// TODO(3.8 Q15): Replace with a dedicated brief builder once sub-item F is done.
+		analysisShell := &models.AgentAnalysis{
+			ReviewBody: verdict.Justification,
+		}
+		result := pipeline.Run(ctx, pr, analysisShell)
+		return o.handlePipelineResult(ctx, pr, result)
+	}
+
+	// Should not reach here
+	return models.ReviewResult{
+		PRNumber:    pr.Number,
+		PackageName: pr.PackageName,
+		OldVersion:  pr.OldVersion,
+		NewVersion:  pr.NewVersion,
+		Action:      models.ActionError,
+		Detail:      fmt.Sprintf("Unexpected agent outcome: %s", verdict.Outcome),
+		Success:     false,
+	}
+}
+
+// handlePipelineResult processes the result of an implementation pipeline run,
+// shared between actOnAnalysis (legacy) and actOnAgentVerdict (combined agent).
+func (o *Orchestrator) handlePipelineResult(ctx context.Context, pr models.DependabotPR, result implementation.RunResult) models.ReviewResult {
+	// Check if agent created a PR
+	var replacementNumber int
+	var hasReplacement bool
+	if result.Branch != "" {
+		var findErr error
+		replacementNumber, hasReplacement, findErr = o.github.FindPRByBranch(ctx, result.Branch)
+		if findErr != nil {
+			slog.Warn("failed to look up replacement PR", "branch", result.Branch, "error", findErr)
+		}
+	}
+
+	if result.Success && hasReplacement {
+		slog.Info("Implementation agent created PR, finalising",
+			"pr", pr.Number, "replacement", replacementNumber)
+
+		if err := o.github.UpdatePRTitle(ctx, replacementNumber, implementation.SweeperPRTitle(pr.Title)); err != nil {
+			slog.Warn("failed to update replacement PR title", "pr", replacementNumber, "error", err)
+		}
+		if err := o.github.MarkPRReadyForReview(ctx, replacementNumber); err != nil {
+			slog.Warn("failed to mark replacement PR ready", "pr", replacementNumber, "error", err)
+		}
+		if err := o.github.ClosePRWithComment(ctx, pr.Number,
+			fmt.Sprintf("Replaced by #%d which includes the necessary code changes "+
+				"for this dependency upgrade.\n\n_Automated review._", replacementNumber)); err != nil {
+			slog.Warn("failed to close original PR", "pr", pr.Number, "error", err)
+		}
+
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, result.Detail)
+		o.reportReplacement(pr.Number, replacementNumber, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, replacementNumber))
+		o.recordCreatedPR(replacementNumber, pr.Number)
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
+		return models.ReviewResult{
+			PRNumber:            pr.Number,
+			PackageName:         pr.PackageName,
+			OldVersion:          pr.OldVersion,
+			NewVersion:          pr.NewVersion,
+			Action:              models.ActionReplacementPR,
+			Detail:              result.Detail,
+			ReplacementPRNumber: &replacementNumber,
+			Success:             true,
+		}
+	} else if result.Success && !hasReplacement {
+		slog.Warn("Implementation succeeded but no PR found", "pr", pr.Number, "branch", result.Branch)
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, "implementation completed but no PR was created")
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+		return models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      models.ActionFlaggedForHuman,
+			Detail:      fmt.Sprintf("Implementation completed but no PR was created on branch %s", result.Branch),
+			Success:     true,
+		}
+	}
+
+	// Pipeline failed.
+	var fb strings.Builder
+	if result.GaveUp {
+		fmt.Fprintf(&fb, "%s\n\n_Automated review._", result.Detail)
+	} else {
+		fmt.Fprintf(&fb, "Automated implementation attempted but did not complete.\n\n**Reason:** %s\n\n", result.Detail)
+		if result.ReviewVerdict != nil && len(result.ReviewVerdict.Concerns) > 0 {
+			fb.WriteString("**Review concerns:**\n")
+			for _, c := range result.ReviewVerdict.Concerns {
+				fmt.Fprintf(&fb, "- %s\n", c)
+			}
+			fb.WriteString("\n")
+		}
+		if result.Branch != "" {
+			fmt.Fprintf(&fb, "Branch `%s` contains the partial work.\n\n", result.Branch)
+		}
+		fb.WriteString("_Automated review._")
+	}
+
+	if hasReplacement {
+		if err := o.github.ClosePRWithComment(ctx, replacementNumber,
+			fmt.Sprintf("Closing — automated implementation did not complete successfully.\n\n%s", result.Detail)); err != nil {
+			slog.Warn("failed to close rogue replacement PR", "pr", replacementNumber, "error", err)
+		}
+	}
+
+	if result.GaveUp {
+		giveUpSHA := terminalSHA(result.TipSHA, pr.HeadSHA)
+		if err := o.github.UpsertStatusComment(ctx, pr.Number, giveUpSHA, fb.String()); err != nil {
+			slog.Warn("failed to upsert give-up comment", "pr", pr.Number, "error", err)
+		}
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageGaveUp, result.Detail)
+		o.recordOutcome(pr.Number, giveUpSHA, models.StageGaveUp)
+	} else {
+		if err := o.github.UpsertStatusComment(ctx, pr.Number, pr.HeadSHA, fb.String()); err != nil {
+			slog.Warn("failed to upsert failure comment", "pr", pr.Number, "error", err)
+		}
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, result.Detail)
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+	}
+
+	return models.ReviewResult{
+		PRNumber:    pr.Number,
+		PackageName: pr.PackageName,
+		OldVersion:  pr.OldVersion,
+		NewVersion:  pr.NewVersion,
+		Action:      models.ActionFlaggedForHuman,
+		Detail:      result.Detail,
+		Success:     true,
 	}
 }
 

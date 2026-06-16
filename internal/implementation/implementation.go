@@ -361,6 +361,15 @@ func (p *Pipeline) WithBareClone(path string) *Pipeline {
 	return p
 }
 
+// WithWorkdir sets a pre-prepared working directory for the pipeline to reuse.
+// When set, canonicalWorkdir is skipped and this directory is used directly.
+// This avoids re-cloning the repo when the combined agent has already prepared
+// it — the combined agent and implementation pipeline share the same workdir.
+func (p *Pipeline) WithWorkdir(path string) *Pipeline {
+	p.workdir = path
+	return p
+}
+
 // reportStage is the nil-safe shim for a pipeline progress update.
 func (p *Pipeline) reportStage(prNumber int, pkg, bump string, stage models.PRStage, detail string) {
 	if p.store != nil {
@@ -441,11 +450,14 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 	}
 
 	var createErr error
-	p.workdir, createErr = p.canonicalWorkdir(pr)
-	if createErr != nil {
-		return RunResult{Success: false, Detail: fmt.Sprintf("Could not create workdir: %v", createErr)}
+	if p.workdir == "" {
+		// No pre-prepared workdir (e.g. legacy analyser path or standalone pipeline).
+		p.workdir, createErr = p.canonicalWorkdir(pr)
+		if createErr != nil {
+			return RunResult{Success: false, Detail: fmt.Sprintf("Could not create workdir: %v", createErr)}
+		}
 	}
-	slog.Info("Created working directory", "path", p.workdir)
+	slog.Info("Using working directory", "path", p.workdir)
 
 	repoDir, err := p.cloneAndBranch(ctx, pr, branch)
 	if err != nil {

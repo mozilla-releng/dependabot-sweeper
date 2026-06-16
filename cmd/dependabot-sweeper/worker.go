@@ -35,6 +35,9 @@ type workerOptions struct {
 	analyserThinkingBudget int
 	reviewerModel          string
 	reviewerThinkingBudget int
+	combinedAgentModel     string
+	combinedAgentBudget    float64
+	legacyAnalyser         bool
 	ciVerifyMaxWait        int
 	concurrency            int
 	ciStaleness            time.Duration
@@ -64,10 +67,13 @@ func parseWorkerFlags(args []string) (*workerOptions, error) {
 	fs.IntVar(&o.maxNoProgressIters, "max-no-progress-iterations", 8, "Give up after this many consecutive settled CI-fix attempts with no improvement in the failing-check count (Q12)")
 	fs.IntVar(&o.maxReviewRetries, "max-review-retries", 1, "Times to retry implementation after review rejection")
 	fs.StringVar(&o.implModel, "impl-model", "", "Model for implementation agent")
-	fs.StringVar(&o.analyserModel, "analyser-model", "", "Anthropic model for the analysis agent")
-	fs.IntVar(&o.analyserThinkingBudget, "analyser-thinking-budget", 0, "Extended-thinking token budget for the analyser")
+	fs.StringVar(&o.analyserModel, "analyser-model", "", "Anthropic model for the analysis agent (legacy path; ignored when --legacy-analyser is false)")
+	fs.IntVar(&o.analyserThinkingBudget, "analyser-thinking-budget", 0, "Extended-thinking token budget for the analyser (legacy path)")
 	fs.StringVar(&o.reviewerModel, "reviewer-model", "", "Anthropic model for the reviewer agent")
 	fs.IntVar(&o.reviewerThinkingBudget, "reviewer-thinking-budget", 0, "Extended-thinking token budget for the reviewer")
+	fs.StringVar(&o.combinedAgentModel, "combined-agent-model", "", "Model for the combined analysis+decision agent (Q10; empty = Claude Code default)")
+	fs.Float64Var(&o.combinedAgentBudget, "combined-agent-budget", 20.0, "Max USD spend per PR for the combined agent")
+	fs.BoolVar(&o.legacyAnalyser, "legacy-analyser", false, "Use the pre-Q10 tool-less analyser instead of the combined agent (Q10 rollback)")
 	fs.IntVar(&o.ciVerifyMaxWait, "ci-verify-max-wait", 5400, "Seconds to wait for CI to settle after an implementation push")
 	fs.IntVar(&o.concurrency, "concurrency", 20, "Max PRs to process in parallel")
 	fs.DurationVar(&o.ciStaleness, "ci-staleness", 12*time.Hour, "a CI check pending longer than this (from creation) is treated as stale")
@@ -117,6 +123,12 @@ func buildWorkerConfig(o *workerOptions) (*config.Config, error) {
 	if len(o.ignoreChecks) > 0 {
 		opts = append(opts, config.WithIgnoreChecks(o.ignoreChecks))
 	}
+	if o.combinedAgentModel != "" {
+		opts = append(opts, config.WithCombinedAgentModel(o.combinedAgentModel))
+	}
+	if o.combinedAgentBudget > 0 {
+		opts = append(opts, config.WithCombinedAgentBudget(o.combinedAgentBudget))
+	}
 	return config.FromEnv(opts...)
 }
 
@@ -154,6 +166,9 @@ func runWorker(ctx context.Context, o *workerOptions) int {
 		}
 		orch.WithStore(store)
 		orch.WithLogDir(o.logDir)
+		if o.legacyAnalyser {
+			orch.WithLegacyAnalyser(true)
+		}
 		return orch.Run(scanCtx)
 	}
 

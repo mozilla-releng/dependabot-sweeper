@@ -23,6 +23,8 @@ type Config struct {
 	AnalyserThinkingBudget  int      // tokens for extended thinking in the analyser (0 = disabled)
 	ReviewerModel           string   // empty = use the claude-sonnet-4-6 default set in FromEnv
 	ReviewerThinkingBudget  int      // tokens for extended thinking in the reviewer (0 = disabled)
+	CombinedAgentModel      string   // empty = Claude Code default (combined analysis+decision agent, Q10)
+	CombinedAgentBudget     float64  // max USD spend per PR for the combined agent (default 20.0)
 	IgnoreChecks            []string // CI check names treated as non-blocking (known pre-existing/structural failures)
 	Concurrency             int      // max PRs processed in parallel
 	MaxImplIterations       int      // max CI-fix resume turns per review cycle (initial turn not counted)
@@ -82,6 +84,9 @@ func FromEnv(opts ...Option) (*Config, error) {
 	}
 	if cfg.ReviewerModel == "" {
 		cfg.ReviewerModel = "claude-sonnet-4-6"
+	}
+	if cfg.CombinedAgentBudget == 0 {
+		cfg.CombinedAgentBudget = 20.0
 	}
 	if cfg.CIStaleness == 0 {
 		cfg.CIStaleness = 12 * time.Hour
@@ -163,7 +168,11 @@ func WithMaxImplTime(v int) Option       { return func(c *Config) { c.MaxImplTim
 func WithMaxImplBudget(v float64) Option { return func(c *Config) { c.MaxImplBudget = v } }
 func WithMaxReviewRetries(v int) Option  { return func(c *Config) { c.MaxReviewRetries = v } }
 func WithImplModel(v string) Option      { return func(c *Config) { c.ImplModel = v } }
-func WithAnalyserModel(v string) Option  { return func(c *Config) { c.AnalyserModel = v } }
+func WithCombinedAgentModel(v string) Option { return func(c *Config) { c.CombinedAgentModel = v } }
+func WithCombinedAgentBudget(v float64) Option {
+	return func(c *Config) { c.CombinedAgentBudget = v }
+}
+func WithAnalyserModel(v string) Option { return func(c *Config) { c.AnalyserModel = v } }
 func WithAnalyserThinkingBudget(v int) Option {
 	return func(c *Config) { c.AnalyserThinkingBudget = v }
 }

@@ -33,6 +33,11 @@ type Config struct {
 	BotName     string        // git committer identity for impl commits
 	BotEmail    string
 
+	// DataDir is the root of the sweeper's persistent data: per-PR working
+	// directories and the base bare clone. Defaults to
+	// $SWEEPER_DATA_DIR or ~/.local/share/dependabot-sweeper.
+	// When empty, per-PR workdirs fall back to os.MkdirTemp.
+	DataDir string
 }
 
 // FromEnv creates a Config from environment variables and optional .env file.
@@ -86,6 +91,18 @@ func FromEnv(opts ...Option) (*Config, error) {
 	}
 	if cfg.BotEmail == "" {
 		cfg.BotEmail = "dependabot-helper@users.noreply.github.com"
+	}
+	if cfg.DataDir == "" {
+		if v := os.Getenv("SWEEPER_DATA_DIR"); v != "" {
+			cfg.DataDir = v
+		} else {
+			home, err := os.UserHomeDir()
+			if err == nil {
+				cfg.DataDir = filepath.Join(home, ".local", "share", "dependabot-sweeper")
+			} else {
+				cfg.DataDir = filepath.Join(os.TempDir(), "sweeper-data")
+			}
+		}
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -164,6 +181,7 @@ func WithCIVerifyMaxWait(v int) Option       { return func(c *Config) { c.CIVeri
 func WithCIStaleness(v time.Duration) Option { return func(c *Config) { c.CIStaleness = v } }
 func WithBotName(v string) Option            { return func(c *Config) { c.BotName = v } }
 func WithBotEmail(v string) Option           { return func(c *Config) { c.BotEmail = v } }
+func WithDataDir(v string) Option { return func(c *Config) { c.DataDir = v } }
 
 // loadDotenv loads a .env file from the current directory, if present.
 // Existing environment variables are not overridden.

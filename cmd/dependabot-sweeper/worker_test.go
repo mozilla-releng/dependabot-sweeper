@@ -77,9 +77,9 @@ func TestParseWebFlagsDefaults(t *testing.T) {
 	if opts.db == "" {
 		t.Errorf("db default should not be empty")
 	}
-	want := filepath.Join(os.TempDir(), "sweeper-agent-logs")
-	if opts.logDir != want {
-		t.Errorf("logDir = %q, want %q", opts.logDir, want)
+	// logDir now defaults to "" — it is a legacy fallback superseded by --data-dir.
+	if opts.logDir != "" {
+		t.Errorf("logDir = %q, want empty (legacy flag now defaults to empty)", opts.logDir)
 	}
 }
 

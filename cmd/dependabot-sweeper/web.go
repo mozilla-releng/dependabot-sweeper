@@ -5,8 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/mozilla-releng/dependabot-sweeper/internal/sqlitestore"
@@ -17,6 +16,8 @@ type webOptions struct {
 	listenAddr   string
 	db           string
 	logDir       string
+	dataDir      string
+	repo         string
 	pollInterval time.Duration
 	verbose      bool
 }
@@ -27,8 +28,12 @@ func parseWebFlags(args []string) (*webOptions, error) {
 	fs.StringVar(&o.listenAddr, "listen-addr", "localhost:8080", "Address for the web dashboard")
 	fs.StringVar(&o.db, "db", resolveFlag("", "SWEEPER_DB_PATH", "dependabot-sweeper.db"),
 		"Path to the shared SQLite database (must match --db on the worker process) [env: SWEEPER_DB_PATH]")
-	fs.StringVar(&o.logDir, "log-dir", resolveFlag("", "SWEEPER_LOG_DIR", filepath.Join(os.TempDir(), "sweeper-agent-logs")),
-		"Directory for per-PR agent JSONL logs; must match --log-dir on the worker process [env: SWEEPER_LOG_DIR]")
+	fs.StringVar(&o.logDir, "log-dir", resolveFlag("", "SWEEPER_LOG_DIR", ""),
+		"Legacy: flat directory for per-PR agent JSONL logs; superseded by --data-dir [env: SWEEPER_LOG_DIR]")
+	fs.StringVar(&o.dataDir, "data-dir", resolveFlag("", "SWEEPER_DATA_DIR", ""),
+		"Sweeper data directory for canonical per-PR log paths; must match --data-dir on the worker process [env: SWEEPER_DATA_DIR]")
+	fs.StringVar(&o.repo, "repo", resolveFlag("", "SWEEPER_REPO", ""),
+		"Target repository (owner/repo format) — used with --data-dir to construct per-PR log paths [env: SWEEPER_REPO]")
 	fs.DurationVar(&o.pollInterval, "poll-interval", time.Second,
 		"How often to poll the database for changes and push SSE updates to the browser")
 	fs.BoolVar(&o.verbose, "verbose", false, "Log HTTP requests and DB polling details")
@@ -64,6 +69,13 @@ func runWeb(ctx context.Context, o *webOptions) int {
 
 	statusReader := sqlitestore.NewStatusReader(store.DB())
 	srv := web.NewServer(store, notifier, statusReader, o.logDir, o.listenAddr)
+	if o.dataDir != "" && o.repo != "" {
+		// Canonical per-PR log path: derive the repo slug (owner/repo → owner-repo)
+		// and configure the server to find logs under the per-PR workdir.
+		repoSlug := strings.ReplaceAll(o.repo, "/", "-")
+		srv.WithDataDir(o.dataDir, repoSlug)
+		slog.Info("Using canonical per-PR log paths", "dataDir", o.dataDir, "repoSlug", repoSlug)
+	}
 	slog.Info("Dashboard listening", "addr", o.listenAddr)
 
 	if err := srv.ListenAndServe(ctx); err != nil {

@@ -308,12 +308,13 @@ func BuildGroupedImplementationBrief(
 
 // Pipeline manages the full implementation lifecycle for a single PR.
 type Pipeline struct {
-	config   *config.Config
-	github   *ghclient.Client
-	reviewer *reviewer.Reviewer
-	workdir  string
-	store    progress.Writer // optional; nil for the one-shot `review` command
-	logDir   string          // directory for per-PR agent JSONL logs; defaults to $TMPDIR/sweeper-agent-logs
+	config        *config.Config
+	github        *ghclient.Client
+	reviewer      *reviewer.Reviewer
+	workdir       string
+	store         progress.Writer // optional; nil for the one-shot `review` command
+	logDir        string          // explicit log dir override; when empty, logs go under workdir
+	bareClonePath string          // optional: path to a local bare clone; when set, cloneAndBranch clones locally
 
 	// bumpTipSHA is the branch's actual tip SHA captured in cloneAndBranch right
 	// after `checkout -b branch pr.HeadRef`, before the worker runs — i.e. the
@@ -342,11 +343,21 @@ func (p *Pipeline) WithStore(s progress.Writer) *Pipeline {
 	return p
 }
 
-// WithLogDir sets the directory where per-PR agent JSONL logs are written.
-// Defaults to $TMPDIR/sweeper-agent-logs when not set. The web process must use
-// the same directory to serve the agent-log endpoint (--log-dir / SWEEPER_LOG_DIR).
+// WithLogDir sets an explicit directory where per-PR agent JSONL logs are written.
+// When not set, logs are written under the canonical per-PR workdir (see
+// canonicalWorkdir), which is the preferred path. Set this only when the workdir
+// is not used (e.g. one-shot `review` command or legacy deployments).
 func (p *Pipeline) WithLogDir(dir string) *Pipeline {
 	p.logDir = dir
+	return p
+}
+
+// WithBareClone sets the path to a local bare clone of the target repository.
+// When set, cloneAndBranch clones from this local path instead of from GitHub —
+// a cheap local operation rather than a full network clone. The orchestrator
+// manages the bare clone lifecycle (ensureBareClone in orchestrator).
+func (p *Pipeline) WithBareClone(path string) *Pipeline {
+	p.bareClonePath = path
 	return p
 }
 
@@ -430,7 +441,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 	}
 
 	var createErr error
-	p.workdir, createErr = os.MkdirTemp("", "sweeper-impl-*")
+	p.workdir, createErr = p.canonicalWorkdir(pr)
 	if createErr != nil {
 		return RunResult{Success: false, Detail: fmt.Sprintf("Could not create workdir: %v", createErr)}
 	}
@@ -577,10 +588,10 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		}
 
 		// Review gate. CI is acceptable; have the reviewer judge the change.
-		// Diff/commits are taken relative to the captured post-rebase bump tip —
-		// the agent's own work — not origin/<HeadRef>, which is mis-based and can
-		// read empty/wrong once the worker force-pushes (M4 / MINOR-1).
-		diff := p.getBranchDiff(ctx, repoDir, p.bumpTipSHA)
+		// Commit list is taken relative to the captured post-rebase bump tip —
+		// the agent's own work — not origin/<HeadRef> (M4 / MINOR-1).
+		// The reviewer runs as a claude subprocess with full tool access and reads
+		// the diff directly via git diff — no pre-fetched, size-capped diff needed.
 		commits := p.getBranchCommits(ctx, repoDir, p.bumpTipSHA)
 		messages := make([]string, len(commits))
 		for i, c := range commits {
@@ -590,8 +601,10 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageReviewing, "")
 		verdict, err := p.reviewer.Review(
 			ctx,
+			repoDir, p.bumpTipSHA, branch,
 			analysis.ReviewBody, analysis.CodeChanges,
-			diff, len(commits), messages,
+			len(commits), messages,
+			1,
 		)
 		if err != nil {
 			slog.Error("Review failed", "error", err)
@@ -868,18 +881,35 @@ func (p *Pipeline) cloneAndBranch(ctx context.Context, pr models.DependabotPR, b
 	repoDir := filepath.Join(p.workdir, "repo")
 	repoName := p.github.RepoFullName()
 
-	slog.Info("Cloning repo", "repo", repoName)
 	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	// -c credential.helper="" first resets any inherited helper, then ours is
-	// added — so auth comes solely from GH_TOKEN via gitCredentialHelper.
-	clone := exec.CommandContext(cloneCtx, "git",
-		"-c", "credential.helper=",
-		"-c", "credential.helper="+gitCredentialHelper,
-		"clone", "--no-checkout", "--filter=blob:none", tokenlessCloneURL(repoName), repoDir)
-	clone.Env = p.gitEnv()
-	if out, err := clone.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git clone failed: %w\n%s", err, out)
+
+	if p.bareClonePath != "" {
+		// Fast path: clone from the local bare clone — no network, no credentials.
+		slog.Info("Cloning repo from local bare clone", "bare", p.bareClonePath)
+		clone := exec.CommandContext(cloneCtx, "git",
+			"clone", "--no-checkout", "--local", p.bareClonePath, repoDir)
+		if out, err := clone.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git clone (local) failed: %w\n%s", err, out)
+		}
+		// Point origin at the tokenless GitHub URL so the worker's git push
+		// (authenticated via gitCredentialHelper + GH_TOKEN) goes to GitHub.
+		if out, err := exec.Command("git", "-C", repoDir, "remote", "set-url", "origin", tokenlessCloneURL(repoName)).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git remote set-url failed: %w\n%s", err, out)
+		}
+	} else {
+		// Network path: clone directly from GitHub.
+		slog.Info("Cloning repo from GitHub", "repo", repoName)
+		// -c credential.helper="" first resets any inherited helper, then ours is
+		// added — so auth comes solely from GH_TOKEN via gitCredentialHelper.
+		clone := exec.CommandContext(cloneCtx, "git",
+			"-c", "credential.helper=",
+			"-c", "credential.helper="+gitCredentialHelper,
+			"clone", "--no-checkout", "--filter=blob:none", tokenlessCloneURL(repoName), repoDir)
+		clone.Env = p.gitEnv()
+		if out, err := clone.CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git clone failed: %w\n%s", err, out)
+		}
 	}
 
 	// Persist the credential helper into the repo's local config so the worker's
@@ -956,7 +986,13 @@ func (p *Pipeline) runWorkerTurn(ctx context.Context, repoDir, sessionID, input 
 	// file across launch + resume invocations.
 	effectiveLogDir := p.logDir
 	if effectiveLogDir == "" {
-		effectiveLogDir = filepath.Join(os.TempDir(), "sweeper-agent-logs")
+		if p.workdir != "" {
+			// Preferred: co-locate logs with the per-PR workdir so they are
+			// accessible for the duration of the PR and cleaned up with it.
+			effectiveLogDir = p.workdir
+		} else {
+			effectiveLogDir = filepath.Join(os.TempDir(), "sweeper-agent-logs")
+		}
 	}
 	if err := os.MkdirAll(effectiveLogDir, 0o755); err != nil {
 		slog.Warn("could not create agent log dir", "dir", effectiveLogDir, "error", err)
@@ -1052,9 +1088,12 @@ func buildReviewFeedback(concerns []string) string {
 // workerCommand builds the claude CLI args for one bounded worker turn. A launch
 // turn pins a known --session-id (so the orchestrator can resume it); a resume
 // turn continues that session with new stdin. Stays on --print (keeps
-// --max-budget-usd) and --bare (no hooks/skills/plugins). Pure.
+// --max-budget-usd). --bare is deliberately NOT used: it disables hooks, skills,
+// and plugins that may be installed on the managed GCP instance — blocking them
+// is the same principle violation as restricting tools. The agent must have access
+// to all installed capabilities. Pure.
 func workerCommand(sessionID string, resume bool, budgetUSD float64, model string) []string {
-	cmd := []string{"claude", "--print", "--dangerously-skip-permissions", "--bare",
+	cmd := []string{"claude", "--print", "--dangerously-skip-permissions",
 		"--output-format", "stream-json", "--verbose",
 		"--max-budget-usd", fmt.Sprintf("%.2f", budgetUSD)}
 	if resume {
@@ -1236,9 +1275,54 @@ func (p *Pipeline) squashBranch(ctx context.Context, repoDir, bumpTipSHA, branch
 	return nil
 }
 
+// canonicalWorkdir returns the stable per-PR working directory path:
+//
+//	<DataDir>/pr/<owner>-<repo>/pr-<N>/
+//
+// This is preferred over os.MkdirTemp for two reasons:
+//  1. The path is deterministic, so operator tooling can inspect it by PR number.
+//  2. The orchestrator's closed-PR sweep can delete it when the PR is closed.
+//
+// If the directory already exists (crash residue from a prior run), it is deleted
+// and recreated — the program never silently reuses potentially dirty state. This
+// is safe because agents work in their own clones and never write to the bare
+// clone.
+//
+// Falls back to os.MkdirTemp when DataDir is empty (one-shot `review` command or
+// legacy deployments that have not set SWEEPER_DATA_DIR).
+func (p *Pipeline) canonicalWorkdir(pr models.DependabotPR) (string, error) {
+	if p.config.DataDir == "" {
+		// Legacy / one-shot path: fall back to a temp directory.
+		return os.MkdirTemp("", "sweeper-impl-*")
+	}
+	repoSlug := strings.ReplaceAll(p.github.RepoFullName(), "/", "-")
+	dir := filepath.Join(p.config.DataDir, "pr", repoSlug, fmt.Sprintf("pr-%d", pr.Number))
+
+	// If the directory already exists (crash residue), remove it to avoid
+	// silently reusing dirty state from a prior run.
+	if _, err := os.Stat(dir); err == nil {
+		slog.Info("Removing stale workdir (crash residue)", "path", dir)
+		if err := os.RemoveAll(dir); err != nil {
+			return "", fmt.Errorf("removing stale workdir %s: %w", dir, err)
+		}
+	}
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("creating canonical workdir %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
 func (p *Pipeline) cleanup() {
 	if p.workdir != "" {
-		os.RemoveAll(p.workdir)
-		slog.Info("Cleaned up working directory", "path", p.workdir)
+		// Only remove the workdir if it is a temp dir (DataDir not set). When
+		// DataDir is set, the orchestrator's reapClosed sweep owns deletion — the
+		// directory persists so logs and artefacts are available until the PR closes.
+		if p.config.DataDir == "" {
+			os.RemoveAll(p.workdir)
+			slog.Info("Cleaned up working directory", "path", p.workdir)
+		} else {
+			slog.Info("Workdir preserved for post-mortem / log serving", "path", p.workdir)
+		}
 	}
 }

@@ -42,9 +42,7 @@ then produce a structured review.
 The dependabot PR body below typically contains links to upstream release notes,
 changelogs, commit lists, and a compare view URL showing the full source diff
 between the old and new versions. Use these as your primary source of information
-about what changed upstream. If release notes are truncated or missing, the compare
-URL (usually in the Commits section) lets you see the full code delta — review it
-if the scope is manageable, or focus on release notes/changelog for very large diffs.
+about what changed upstream.
 
 %s
 

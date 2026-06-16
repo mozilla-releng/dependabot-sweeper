@@ -49,22 +49,44 @@ const logTailLines = 200
 
 // Server exposes the store over HTTP.
 type Server struct {
-	store  progress.Reader
-	notify progress.Notifier
-	status StatusProvider
-	logDir string
-	addr   string
+	store    progress.Reader
+	notify   progress.Notifier
+	status   StatusProvider
+	logDir   string // legacy flat log directory (--log-dir); used when dataDir is empty
+	dataDir  string // canonical sweeper data directory (--data-dir / SWEEPER_DATA_DIR)
+	repoSlug string // owner-repo slug derived from --repo (e.g. "mozilla-releng-dependabot-sweeper")
+	addr     string
 }
 
-// NewServer builds a Server bound (logically) to addr. logDir is the directory
-// where the implementation pipeline writes per-PR agent logs; it must be the
-// same path both worker and web processes use (see --log-dir / SWEEPER_LOG_DIR).
+// NewServer builds a Server bound (logically) to addr. logDir is the legacy
+// flat directory where the implementation pipeline writes per-PR agent logs
+// (for backward compatibility with deployments that have not set --data-dir).
+// Call WithDataDir to enable the canonical per-PR log path.
 func NewServer(store progress.Reader, notify progress.Notifier, status StatusProvider, logDir, addr string) *Server {
 	return &Server{store: store, notify: notify, status: status, logDir: logDir, addr: addr}
 }
 
+// WithDataDir configures the canonical sweeper data directory and repo slug.
+// When set, agentLogPath uses the per-PR canonical path:
+//
+//	<dataDir>/pr/<repoSlug>/pr-<N>/pr-<N>-agent.jsonl
+//
+// This takes precedence over the legacy logDir. Returns the receiver for chaining.
+func (s *Server) WithDataDir(dataDir, repoSlug string) *Server {
+	s.dataDir = dataDir
+	s.repoSlug = repoSlug
+	return s
+}
+
 // agentLogPath returns the on-disk path of a PR's live agent JSON log.
+// When dataDir and repoSlug are set (via WithDataDir), returns the canonical
+// per-PR path. Otherwise falls back to the legacy flat logDir.
 func (s *Server) agentLogPath(prNumber int) string {
+	if s.dataDir != "" && s.repoSlug != "" {
+		// Canonical per-PR path: <dataDir>/pr/<repoSlug>/pr-<N>/pr-<N>-agent.jsonl
+		return filepath.Join(s.dataDir, "pr", s.repoSlug, fmt.Sprintf("pr-%d", prNumber), fmt.Sprintf("pr-%d-agent.jsonl", prNumber))
+	}
+	// Legacy fallback: shared flat directory
 	return filepath.Join(s.logDir, fmt.Sprintf("pr-%d-agent.jsonl", prNumber))
 }
 

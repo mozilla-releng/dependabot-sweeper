@@ -272,9 +272,15 @@ func TestWorkerCommand(t *testing.T) {
 	id := "abc-123"
 	launch := workerCommand(id, false, 50, "")
 	joined := strings.Join(launch, " ")
-	if !strings.Contains(joined, "--print") || !strings.Contains(joined, "--bare") ||
+	if !strings.Contains(joined, "--print") ||
 		!strings.Contains(joined, "--session-id "+id) || !strings.Contains(joined, "--max-budget-usd") {
 		t.Fatalf("launch cmd missing required flags: %q", joined)
+	}
+	// --bare is deliberately NOT used: it blocks hooks/skills/plugins that may
+	// be installed on the managed GCP instance (principle violation). Verify it
+	// is absent.
+	if strings.Contains(joined, "--bare") {
+		t.Fatalf("launch cmd must NOT contain --bare (6.B): %q", joined)
 	}
 	if strings.Contains(joined, "--resume") {
 		t.Fatalf("launch cmd must not contain --resume: %q", joined)

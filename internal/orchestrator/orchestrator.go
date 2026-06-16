@@ -5,6 +5,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -20,16 +23,17 @@ import (
 
 // Orchestrator processes dependabot PRs with bounded concurrency (config.Concurrency).
 type Orchestrator struct {
-	config    *config.Config
-	repo      string
-	dryRun    bool
-	verbose   bool
-	reviewers []string
-	onlyPR    int // 0 means process all
-	github    *ghclient.Client
-	analyser  *analyser.Analyser
-	store     progress.ReadWriter // optional; nil for the one-shot `review` command
-	logDir    string              // forwarded to each implementation pipeline
+	config        *config.Config
+	repo          string
+	dryRun        bool
+	verbose       bool
+	reviewers     []string
+	onlyPR        int // 0 means process all
+	github        *ghclient.Client
+	analyser      *analyser.Analyser
+	store         progress.ReadWriter // optional; nil for the one-shot `review` command
+	logDir        string              // forwarded to each implementation pipeline
+	bareClonePath string              // set by Run() after ensureBareClone; forwarded to each pipeline
 }
 
 // New creates an Orchestrator for the given repository. acceptAuthors are
@@ -85,15 +89,48 @@ func (o *Orchestrator) reportStage(prNumber int, pkg, bump string, stage models.
 // reapClosed deletes store rows for PRs that are no longer in open. It is keyed
 // off allPRs (the full open set from GitHub), not toProcess, so --pr N mode
 // never prunes rows for other PRs. No-op when no store is attached.
+//
+// It also sweeps per-PR working directories under DataDir: any pr-<N>/ directory
+// whose PR is absent from the open set is deleted. The GaveUp caveat: a gave_up
+// PR's working directory persists until the PR is manually closed or merged (the
+// original dependabot PR stays open) — this is a known, accepted gap.
 func (o *Orchestrator) reapClosed(open []models.DependabotPR) {
-	if o.store == nil {
-		return
-	}
 	nums := make([]int, len(open))
+	openSet := make(map[int]bool, len(open))
 	for i, pr := range open {
 		nums[i] = pr.Number
+		openSet[pr.Number] = true
 	}
-	o.store.Reap(nums)
+	if o.store != nil {
+		o.store.Reap(nums)
+	}
+
+	// Sweep per-PR working directories: delete any pr-<N>/ directory whose PR
+	// is absent from the open-PR list.
+	if o.config.DataDir != "" {
+		repoSlug := strings.ReplaceAll(o.repo, "/", "-")
+		prDir := filepath.Join(o.config.DataDir, "pr", repoSlug)
+		entries, err := os.ReadDir(prDir)
+		if err != nil && !os.IsNotExist(err) {
+			slog.Warn("could not sweep per-PR workdirs", "dir", prDir, "error", err)
+		}
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			var prNum int
+			if _, err := fmt.Sscanf(e.Name(), "pr-%d", &prNum); err != nil {
+				continue
+			}
+			if !openSet[prNum] {
+				dir := filepath.Join(prDir, e.Name())
+				slog.Info("Removing closed-PR workdir", "pr", prNum, "path", dir)
+				if err := os.RemoveAll(dir); err != nil {
+					slog.Warn("could not remove closed-PR workdir", "pr", prNum, "path", dir, "error", err)
+				}
+			}
+		}
+	}
 }
 
 // prepopulate stamps `pending` (the graph entry) for every PR the store has not
@@ -218,6 +255,19 @@ func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 		toProcess = filtered
 	}
 
+	// Ensure the bare clone exists and is up to date — must run before PR
+	// goroutines launch to avoid a git fetch racing with active agent git
+	// operations. Failure is non-fatal: pipelines fall back to network clones.
+	if o.config.DataDir != "" {
+		bare, err := ensureBareClone(ctx, o.config.DataDir, o.repo, o.config.GitHubToken)
+		if err != nil {
+			slog.Warn("Could not ensure bare clone — PRs will clone from GitHub directly", "error", err)
+		} else {
+			o.bareClonePath = bare
+			slog.Info("Bare clone ready", "path", bare)
+		}
+	}
+
 	// Process PRs with bounded concurrency. Each PR is independent — its own
 	// temp clone, branch, replacement PR, and implementation pipeline — and the
 	// shared resources (the go-github client, the analyser, and the read-only
@@ -313,6 +363,13 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 	// covers this package at >= this version. A grouped PR is never closed as
 	// stale — it bumps other members too — and an individual never closes a
 	// whole group; hence the !pr.Grouped guard and the directional group check.
+	//
+	// NOTE: FindNewerPRForPackage is the PRIMARY guard against same-package
+	// parallel processing. Because only the higher-version PR proceeds past
+	// this gate, at most one PR per package reaches the implementation pipeline
+	// at a time. Per-PR directory isolation (6.D) is the backstop — it prevents
+	// data corruption if two PRs for the same package somehow both pass this
+	// gate — but it is NOT the primary defence. The staleness check here is.
 	if !pr.Grouped {
 		var detail, comment string
 		if newer := ghclient.FindNewerPRForPackage(pr, allPRs); newer != nil {
@@ -747,6 +804,9 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 		if o.logDir != "" {
 			pipeline.WithLogDir(o.logDir)
 		}
+		if o.bareClonePath != "" {
+			pipeline.WithBareClone(o.bareClonePath)
+		}
 		result := pipeline.Run(ctx, pr, analysis)
 
 		// Check if agent created a PR
@@ -951,4 +1011,69 @@ func PrintSummary(results []models.ReviewResult) {
 		}
 		fmt.Println()
 	}
+}
+
+// gitCredentialHelperOrch is a git credential.helper that supplies the GitHub
+// token from the GH_TOKEN environment variable. Duplicated from implementation
+// package (same constant, not imported to keep packages decoupled).
+const gitCredentialHelperOrch = `!f() { echo username=x-access-token; echo "password=${GH_TOKEN}"; }; f`
+
+// bareCloneDir returns the stable path for the bare clone of a repo:
+//
+//	<dataDir>/base/<owner>-<repo>.git
+func bareCloneDir(dataDir, repoName string) string {
+	slug := strings.ReplaceAll(repoName, "/", "-")
+	return filepath.Join(dataDir, "base", slug+".git")
+}
+
+// ensureBareClone creates or re-fetches the bare clone of repoName at the
+// canonical path. On fetch failure the bare clone is deleted and re-cloned from
+// scratch. Returns the bare clone path on success.
+//
+// Must be called before PR goroutines launch — a concurrent git fetch from
+// multiple pipelines reading the same bare clone is safe (reads are safe), but
+// a fetch that modifies the bare clone while a pipeline is reading it is not.
+func ensureBareClone(ctx context.Context, dataDir, repoName, token string) (string, error) {
+	barePath := bareCloneDir(dataDir, repoName)
+	gitEnv := append(os.Environ(), "GH_TOKEN="+token)
+	tokenlessURL := fmt.Sprintf("https://github.com/%s.git", repoName)
+
+	if _, err := os.Stat(barePath); err == nil {
+		// Bare clone exists — re-fetch to pick up new commits and tags.
+		slog.Info("Re-fetching bare clone", "path", barePath)
+		fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+		defer cancel()
+		fetch := exec.CommandContext(fetchCtx, "git",
+			"-c", "credential.helper=",
+			"-c", "credential.helper="+gitCredentialHelperOrch,
+			"-C", barePath, "fetch", "--tags", "origin")
+		fetch.Env = gitEnv
+		if out, err := fetch.CombinedOutput(); err != nil {
+			slog.Warn("Bare clone fetch failed — re-cloning from scratch",
+				"path", barePath, "error", err, "output", string(out))
+			if rerr := os.RemoveAll(barePath); rerr != nil {
+				return "", fmt.Errorf("removing failed bare clone: %w", rerr)
+			}
+			// Fall through to create a fresh bare clone.
+		} else {
+			return barePath, nil
+		}
+	}
+
+	// Create a fresh bare clone.
+	slog.Info("Creating bare clone", "path", barePath, "repo", repoName)
+	if err := os.MkdirAll(filepath.Dir(barePath), 0o755); err != nil {
+		return "", fmt.Errorf("creating bare clone parent dir: %w", err)
+	}
+	cloneCtx, cancel := context.WithTimeout(ctx, 15*time.Minute)
+	defer cancel()
+	clone := exec.CommandContext(cloneCtx, "git",
+		"-c", "credential.helper=",
+		"-c", "credential.helper="+gitCredentialHelperOrch,
+		"clone", "--bare", tokenlessURL, barePath)
+	clone.Env = gitEnv
+	if out, err := clone.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("git clone --bare failed: %w\n%s", err, out)
+	}
+	return barePath, nil
 }

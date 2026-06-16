@@ -171,6 +171,18 @@ pass. Key commits:
   (evaluated), `RunResult.Justification` propagated, posted to replacement PR body on approval via
   `UpdatePRBody`; reviewer tests for `justification_ok` / `justification_concern`.
 
+**Post-code-complete critical fixes (code review findings):**
+- **G. Q8 guard wired (Finding 1):** 3d2b930 — `ValidateTransition` was a dead library; now wired
+  into `reportStage` in the orchestrator (the single choke-point for all progress updates). Hard
+  block on illegal transitions; cost-safety invariant now actually enforced.
+- **H. GaveUp silent path (Finding 2):** aed77c8 — `handlePipelineResult` was calling
+  `UpsertStatusComment` on the `GaveUp` branch (Q3 violation). Removed; the path is now silent.
+  `actOnAgentVerdict`'s `gave_up` case was already correct.
+- **I. Base-failure suppression removed from impl CI gate (Finding 3):** f84fb1f — Q3 decided base
+  failures are not suppressed. Both `AcceptableGiven` calls in `implementation.go` now pass `nil`
+  for `baseFailures`; `suppressedChecksNote` likewise. `suppressedChecks()` replaced by
+  `ignoredChecks()` (only the operator `--ignore-check` set).
+
 **Before merging to main:** run an e2e cycle against `petemoore/taskcluster` with a real key,
 watching that no PR re-enters the agentic pipeline in a loop (the cost-safety invariant), and
 confirm each outcome (recommend / replacement / flag / silent-draft) on a real PR.
@@ -185,14 +197,16 @@ confirm each outcome (recommend / replacement / flag / silent-draft) on a real P
   ref name `origin/<HeadRef>` — MINOR-1). Q11 kept inherit-and-rebase. Confirmed empirically on
   petemoore/taskcluster #193 in Phase 0 (the "fix" commit bundled 300 files). The squash-base fix
   is validated by a git-integration test (`TestSquashBranchUsesCapturedTipNotStaleBase`).
-- [~] **T6 / T6a — Decision graph not enforced + idempotent skips pollute history. (Q8 → c: both,
+- [x] **T6 / T6a — Decision graph not enforced + idempotent skips pollute history. (Q8 → c: both,
   SPLIT across phases — review C2.)** (1) **Phase 1 — DONE, PR #1:** reporting-noise fix — a no-op
   cycle records **nothing**: `prepopulate()` stamps `pending` only for unseen PRs (preserving row
   creation), and the `processPR`-top + skip-path re-stamps are removed; the dashboard reads the
   stored stage from the row. (No `finalized→finalized` self-loop is then emitted.) (2) **Phase 3
-  (after spec.go reconciled) — TODO:** runtime guard — `Report(stage)` validates against the
-  post-Q10 graph, rejects/loud-logs illegal transitions; collapse non-stage nodes following
-  **both decision AND back edges** (review N2). Cost-safety-critical.
+  — DONE, 3d2b930 (branch):** runtime guard wired into `reportStage` — looks up the current stage
+  via `store.Get`, calls `workflow.ValidateTransition(prev, next)`, and hard-blocks (no write,
+  ERROR log) on an illegal transition. Cost-safety-critical: a finalized PR can no longer re-enter
+  the agentic pipeline via a reporting bug. Tests: `TestReportStageBlocksIllegalTransition` and
+  `TestReportStageAllowsLegalTransition` in `store_wiring_test.go`.
 - [x] **T4 — Stale `spec.go` comment** on the `gave_up` node. **Done — PR #1.** Comment now
   describes the correct current behaviour (records `gave_up` sticky at the head SHA).
 - [x] **T12 — Re-ingestion risk (Q14 → DECIDED):** **PR #6.** Own PRs recorded in a reap-exempt

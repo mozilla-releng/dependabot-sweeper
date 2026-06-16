@@ -479,10 +479,11 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		return RunResult{Success: false, Detail: fmt.Sprintf("Clone/branch failed: %v", err)}
 	}
 
-	// Determine which CI failures are non-blocking for the success criterion:
-	// operator-ignored checks plus checks already failing on the base branch
-	// (pre-existing failures the bump didn't introduce). See Bug #7.
-	ignored, baseFailures := p.suppressedChecks(ctx, pr)
+	// Determine which CI failures are non-blocking for the success criterion.
+	// Q3 (DECIDED): base-branch suppression as a success criterion is dropped —
+	// a required check red on main is "more work," not an excuse. The agent must
+	// fix those failures too. Only the operator --ignore-check escape hatch remains.
+	ignored := p.ignoredChecks()
 
 	// Required-status-check set for the base branch (Q7): when non-empty, only
 	// these checks gate the implementation's success criterion; empty falls back
@@ -508,7 +509,7 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 			analysis.ReviewBody, analysis.CodeChanges, pr.Number,
 		)
 	}
-	brief += suppressedChecksNote(ignored, baseFailures)
+	brief += suppressedChecksNote(ignored)
 
 	// Turn 1: launch.
 	p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageImplRunning, "launch turn")
@@ -537,7 +538,9 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 			// Update the dashboard's CI snapshot on every poll iteration so the
 			// drawer's CI bar tracks live progress through the impl loop.
 			p.setCI(pr.Number, ci)
-			acceptable, blocking := ci.AcceptableGiven(ignored, baseFailures, required, time.Now(), p.config.CIStaleness)
+			// Q3: pass nil for baseFailures — genuine green is the bar;
+			// a required check red on main is not suppressed, it must be fixed.
+			acceptable, blocking := ci.AcceptableGiven(ignored, nil, required, time.Now(), p.config.CIStaleness)
 			if acceptable {
 				slog.Info("CI gate passed", "pr", pr.Number, "iter", iter)
 				break
@@ -702,7 +705,8 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 					Branch:        branch,
 				}
 			}
-			postAcceptable, postBlocking := postCI.AcceptableGiven(ignored, baseFailures, required, time.Now(), p.config.CIStaleness)
+			// Q3: pass nil for baseFailures — genuine green is the bar.
+			postAcceptable, postBlocking := postCI.AcceptableGiven(ignored, nil, required, time.Now(), p.config.CIStaleness)
 			if !postAcceptable {
 				return RunResult{
 					Success:       false,
@@ -757,66 +761,37 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 	}
 }
 
-// suppressedChecks returns the two sets of CI checks that should not block the
-// implementation success criterion (Bug #7):
-//   - ignored: operator-supplied check names (config.IgnoreChecks) known to be
-//     noisy or structurally broken (e.g. a changelog check that 404s on forks).
-//   - baseFailures: checks already failing on the PR's base branch, so the
-//     change can't be blamed for them. Best-effort — if we can't fetch base CI
-//     we just return an empty set and rely on the ignore-list.
-func (p *Pipeline) suppressedChecks(ctx context.Context, pr models.DependabotPR) (ignored, baseFailures map[string]bool) {
-	ignored = make(map[string]bool, len(p.config.IgnoreChecks))
+// ignoredChecks returns the set of operator-ignored CI check names from
+// config.IgnoreChecks. These are the only checks the implementation CI gate
+// suppresses (Q3): base-branch suppression as a success criterion was dropped
+// in Q3 — a required check red on main is more work, not an excuse; the agent
+// fixes those too. Only the --ignore-check escape hatch remains.
+func (p *Pipeline) ignoredChecks() map[string]bool {
+	ignored := make(map[string]bool, len(p.config.IgnoreChecks))
 	for _, name := range p.config.IgnoreChecks {
 		ignored[name] = true
 	}
-
-	baseFailures = make(map[string]bool)
-	if pr.BaseRef == "" {
-		return ignored, baseFailures
-	}
-	baseCI, err := p.github.GetBranchCI(ctx, pr.BaseRef)
-	if err != nil {
-		slog.Warn("Could not fetch base-branch CI for pre-existing-failure detection", "base", pr.BaseRef, "error", err)
-		return ignored, baseFailures
-	}
-	for _, name := range baseCI.FailureNames() {
-		baseFailures[name] = true
-	}
-	if len(baseFailures) > 0 {
-		slog.Info("Pre-existing base-branch CI failures will not block", "base", pr.BaseRef, "checks", baseCI.FailureNames())
-	}
-	return ignored, baseFailures
+	return ignored
 }
 
 // suppressedChecksNote builds a brief addendum telling the implementation
-// agent which CI checks are known pre-existing/structural failures, so it
-// doesn't waste budget trying to make them green (it can't). Returns "" when
-// there's nothing to suppress.
-func suppressedChecksNote(ignored, baseFailures map[string]bool) string {
-	seen := make(map[string]bool)
-	var names []string
-	for n := range ignored {
-		if !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
-	for n := range baseFailures {
-		if !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
-	if len(names) == 0 {
+// agent which CI checks are operator-ignored (structurally broken / irrelevant),
+// so it doesn't waste budget on them. Returns "" when the ignore list is empty.
+// Q3: base-branch failures are no longer suppressed — the agent must fix those
+// too. Only the operator --ignore-check list is passed here.
+func suppressedChecksNote(ignored map[string]bool) string {
+	if len(ignored) == 0 {
 		return ""
+	}
+	names := make([]string, 0, len(ignored))
+	for n := range ignored {
+		names = append(names, n)
 	}
 	sort.Strings(names)
 	var b strings.Builder
-	b.WriteString("\n\n## Known pre-existing CI failures (do NOT try to fix these)\n")
-	b.WriteString("The following CI checks fail independently of this dependency bump — they are ")
-	b.WriteString("either failing on the base branch already or are structurally broken on this repo. ")
-	b.WriteString("Do not spend effort making them pass; they will be disregarded when judging success. ")
-	b.WriteString("Focus only on failures caused by the dependency change:\n")
+	b.WriteString("\n\n## Operator-ignored CI checks (do NOT try to fix these)\n")
+	b.WriteString("The following CI checks are structurally broken or irrelevant on this repo. ")
+	b.WriteString("Do not spend effort making them pass; they will be disregarded when judging success:\n")
 	for _, n := range names {
 		b.WriteString("- " + n + "\n")
 	}

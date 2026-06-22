@@ -347,17 +347,31 @@ Launch a bounded Claude Code worker subprocess. The worker receives:
 The worker's contract: make the code changes, push, open a **draft** PR, and exit. It
 never polls CI — the orchestrator owns that.
 
-### Phase 3 — CI gate loop
+### Phase 3 — CI gate loop (level-triggered / resumable)
 
-After each worker turn, the orchestrator waits for CI to settle on the worker's branch,
-then evaluates `AcceptableGiven`. Three outcomes:
+After each worker turn, the pipeline evaluates `AcceptableGiven` on the worker's branch —
+but it **never blocks the scan thread waiting for CI**. The pipeline is a resumable state
+machine: each scan advances a PR by at most one worker turn and then *yields* whenever CI is
+pending, persisting a checkpoint (schema v3, `pr_progress.pipeline_checkpoint`). A later scan
+resumes from the checkpoint via `Pipeline.Resume` — reusing the preserved worktree, branch,
+and Claude session, and bypassing re-triage and the (expensive) combined agent — and continues
+from the same phase. This mirrors the level-triggered triage gate ("CI not settled → skip,
+revisit next cycle") so a slow or unschedulable check on one PR can never stall the scan, hold
+worker slots, or block `reapClosed` (the bug this design fixed). Per evaluation:
 
 | CI state | Action |
 |---|---|
-| Acceptable | Proceed to review gate |
-| Not settled (still running) | Keep waiting |
-| Settled but not acceptable | Resume the worker with the failure logs (if iterations remain) |
+| Acceptable | Proceed to review gate (same scan) |
+| Not settled (still running), or no checks registered yet (`Total==0`, post-push) | Yield; re-evaluate next scan |
+| Settled but not acceptable | Resume the worker with the failure logs (if iterations remain), then yield |
 | Iteration or time cap reached | Give up |
+
+> The empty-check guard (`Total==0` ⇒ not-settled) matters because an empty `CIStatus` is
+> vacuously "settled"/"green" (`aggregateChecks` → State `success`); without it a just-pushed
+> branch whose checks haven't registered yet would be misread as passing.
+
+> The one-shot `review` command (no store) has nothing to resume it, so there it falls back to
+> blocking in-process between turns rather than yielding — it still runs to completion.
 
 No-progress guard: if the same set of failing checks recurs across N consecutive resume
 turns, the worker cannot fix them — the loop is abandoned. Precisely:

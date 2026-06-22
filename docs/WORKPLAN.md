@@ -7,13 +7,22 @@ the commit/PR.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[?]` needs a maintainer decision first.
 
-> **Status (2026-06-16): Phase 3.2 cluster + Phase 6 (6.A–6.F pre-deploy) fully MERGED to `main`** —
+> **Status (2026-06-22): level-triggered resumable implementation pipeline MERGED to `main`**
+> (commit `2efdac6`). The implementation pipeline no longer blocks the scan thread polling CI:
+> it is now a resumable state machine that yields when CI is pending and resumes next scan from a
+> persisted checkpoint (schema v3 `pr_progress.pipeline_checkpoint`). Fixes the stall where one
+> unschedulable check held both worker slots and froze `reapClosed` / the dashboard for 40+ min.
+> Also: draft-aware replacement idempotency (an orphaned incomplete draft is flagged, not falsely
+> finalised) and an empty-checks guard (a just-pushed branch isn't misread as green). Plus a
+> `gofmt` + `toolchain go1.26.1` pin (commit `f0daa2b`) to make main CI deterministic.
+> Build/vet/test-race/gofmt/staticcheck all green. See `docs/ALGORITHM.md` Phase 3.
+> **Next: deploy (`e2`) + re-mirror fork (`d0`), then watch the VM logs to confirm scans complete
+> and PRs progress without the 40-min hold (the e2e test-bed verification).**
+>
+> **Earlier (2026-06-16): Phase 3.2 cluster + Phase 6 (6.A–6.F pre-deploy) MERGED to `main`** —
 > combined agent, Q8 guard, Q3 silent-draft, Q13 curate, Q15 justification, Phase 6 quick wins
 > (6.A/6.C/6.D/6.E open items), Phase 6.B (codebase.go removed), Claude session cleanup in
-> reapClosed. Build/test/staticcheck green.
-> **Next: deploy (`e2`), resync fork (`e1`), run Phase 6.F mdi-react regression test.**
-> **E2e verification against the live test bed is still pending** (required before claiming
-> Phase 3.2 fully done per WORKPLAN).
+> reapClosed. E2e verification against the live test bed was still pending at that point.
 >
 > Still open: **Phase 4** (UI, needs a browser session). See `docs/questions.md` for the two
 > maintainer decisions.

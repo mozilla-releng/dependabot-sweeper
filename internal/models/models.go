@@ -13,7 +13,6 @@ const (
 	BumpUnknown BumpType = "unknown"
 )
 
-
 // Recommendation is the analysis agent's verdict on a dependency bump.
 type Recommendation string
 

@@ -6,7 +6,6 @@ import (
 	"time"
 )
 
-
 func TestSettled(t *testing.T) {
 	now := time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)
 	stale := 12 * time.Hour

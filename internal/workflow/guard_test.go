@@ -118,7 +118,7 @@ func TestTransitionGuardResumptionLoopRoundTrip(t *testing.T) {
 		models.StageResuming,  // again (second fix iteration)
 		models.StageWaitingCI,
 		models.StageReviewing,
-		models.StageResuming,  // review-fix back to impl
+		models.StageResuming, // review-fix back to impl
 		models.StageWaitingCI,
 		models.StageReviewing,
 		models.StageFinalized,

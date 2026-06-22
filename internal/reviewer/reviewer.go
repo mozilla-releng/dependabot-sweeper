@@ -139,8 +139,8 @@ func (r *Reviewer) Review(
 	repoDir string,
 	bumpTipSHA string,
 	branch string,
-	workdir string,  // per-PR working directory (for the brief)
-	headSHA string,  // current HEAD of the branch being reviewed
+	workdir string, // per-PR working directory (for the brief)
+	headSHA string, // current HEAD of the branch being reviewed
 	assessmentReviewBody string,
 	assessmentCodeChanges []models.CodeChangeEntry,
 	commitCount int,
@@ -271,18 +271,18 @@ func (r *Reviewer) BuildBrief(
 	}
 
 	return fmt.Sprintf(reviewerBrief,
-		bumpTipSHA,           // for git diff command example
-		workdir,              // working directory
-		workdir,              // repo clone path prefix (workdir/repo/)
-		branch,               // branch name
-		headSHA,              // HEAD SHA
-		bumpTipSHA,           // bump tip SHA
-		turnNumber,           // turn number
+		bumpTipSHA, // for git diff command example
+		workdir,    // working directory
+		workdir,    // repo clone path prefix (workdir/repo/)
+		branch,     // branch name
+		headSHA,    // HEAD SHA
+		bumpTipSHA, // bump tip SHA
+		turnNumber, // turn number
 		assessmentReviewBody,
 		codeChangesText,
 		commitCount,
 		commitMessagesText,
-		justificationText,    // justification section (or empty)
+		justificationText, // justification section (or empty)
 	)
 }
 

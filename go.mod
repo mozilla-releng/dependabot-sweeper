@@ -2,6 +2,8 @@ module github.com/mozilla-releng/dependabot-sweeper
 
 go 1.26
 
+toolchain go1.26.1
+
 require (
 	github.com/anthropics/anthropic-sdk-go v1.50.1
 	github.com/google/go-github/v72 v72.0.0

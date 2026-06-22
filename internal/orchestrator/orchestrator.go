@@ -32,11 +32,11 @@ type Orchestrator struct {
 	onlyPR         int // 0 means process all
 	github         *ghclient.Client
 	combinedAgent  *agent.CombinedAgent
-	analyser       *analyser.Analyser     // legacy path only (--legacy-analyser)
-	legacyAnalyser bool                   // when true, use the old analyser instead of combinedAgent
-	store          progress.ReadWriter    // optional; nil for the one-shot `review` command
-	logDir         string                 // forwarded to each implementation pipeline
-	bareClonePath  string                 // set by Run() after ensureBareClone; forwarded to each pipeline
+	analyser       *analyser.Analyser  // legacy path only (--legacy-analyser)
+	legacyAnalyser bool                // when true, use the old analyser instead of combinedAgent
+	store          progress.ReadWriter // optional; nil for the one-shot `review` command
+	logDir         string              // forwarded to each implementation pipeline
+	bareClonePath  string              // set by Run() after ensureBareClone; forwarded to each pipeline
 }
 
 // New creates an Orchestrator for the given repository. acceptAuthors are
@@ -358,7 +358,6 @@ func (o *Orchestrator) Run(ctx context.Context) []models.ReviewResult {
 	}
 	return out
 }
-
 
 func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, allPRs []models.DependabotPR) models.ReviewResult {
 	slog.Info("Processing PR",

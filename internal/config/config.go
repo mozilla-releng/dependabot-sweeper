@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
 )
 
 // Config holds all configuration for the pipeline.
@@ -164,10 +163,10 @@ func validateThinkingBudget(flag string, v int) error {
 // Option is a functional option for overriding Config defaults.
 type Option func(*Config)
 
-func WithMaxImplTime(v int) Option       { return func(c *Config) { c.MaxImplTime = v } }
-func WithMaxImplBudget(v float64) Option { return func(c *Config) { c.MaxImplBudget = v } }
-func WithMaxReviewRetries(v int) Option  { return func(c *Config) { c.MaxReviewRetries = v } }
-func WithImplModel(v string) Option      { return func(c *Config) { c.ImplModel = v } }
+func WithMaxImplTime(v int) Option           { return func(c *Config) { c.MaxImplTime = v } }
+func WithMaxImplBudget(v float64) Option     { return func(c *Config) { c.MaxImplBudget = v } }
+func WithMaxReviewRetries(v int) Option      { return func(c *Config) { c.MaxReviewRetries = v } }
+func WithImplModel(v string) Option          { return func(c *Config) { c.ImplModel = v } }
 func WithCombinedAgentModel(v string) Option { return func(c *Config) { c.CombinedAgentModel = v } }
 func WithCombinedAgentBudget(v float64) Option {
 	return func(c *Config) { c.CombinedAgentBudget = v }
@@ -190,7 +189,7 @@ func WithCIVerifyMaxWait(v int) Option       { return func(c *Config) { c.CIVeri
 func WithCIStaleness(v time.Duration) Option { return func(c *Config) { c.CIStaleness = v } }
 func WithBotName(v string) Option            { return func(c *Config) { c.BotName = v } }
 func WithBotEmail(v string) Option           { return func(c *Config) { c.BotEmail = v } }
-func WithDataDir(v string) Option { return func(c *Config) { c.DataDir = v } }
+func WithDataDir(v string) Option            { return func(c *Config) { c.DataDir = v } }
 
 // loadDotenv loads a .env file from the current directory, if present.
 // Existing environment variables are not overridden.

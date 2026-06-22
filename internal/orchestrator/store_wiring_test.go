@@ -141,7 +141,6 @@ func TestGaveUpSkipFiresAfterRebase(t *testing.T) {
 	}
 }
 
-
 // TestUnknownBumpTypeSkipRecording is a regression test for the implicit safety
 // net that was lost when the min-bump threshold was removed (Phase 3): previously
 // BumpRank(BumpUnknown) < BumpRank(BumpMajor) silently excluded parse-failure

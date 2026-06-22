@@ -315,14 +315,14 @@ func BuildGroupedImplementationBrief(
 
 // Pipeline manages the full implementation lifecycle for a single PR.
 type Pipeline struct {
-	config               *config.Config
-	github               *ghclient.Client
-	reviewer             *reviewer.Reviewer
-	workdir              string
-	store                progress.Writer // optional; nil for the one-shot `review` command
-	logDir               string          // explicit log dir override; when empty, logs go under workdir
-	bareClonePath        string          // optional: path to a local bare clone; when set, cloneAndBranch clones locally
-	agentJustification   string          // when non-empty, curateBranch is used instead of squashBranch (Q13)
+	config             *config.Config
+	github             *ghclient.Client
+	reviewer           *reviewer.Reviewer
+	workdir            string
+	store              progress.Writer // optional; nil for the one-shot `review` command
+	logDir             string          // explicit log dir override; when empty, logs go under workdir
+	bareClonePath      string          // optional: path to a local bare clone; when set, cloneAndBranch clones locally
+	agentJustification string          // when non-empty, curateBranch is used instead of squashBranch (Q13)
 
 	// bumpTipSHA is the branch's actual tip SHA captured in cloneAndBranch right
 	// after `checkout -b branch pr.HeadRef`, before the worker runs — i.e. the

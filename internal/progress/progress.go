@@ -13,6 +13,13 @@ type Writer interface {
 	Report(prNumber int, pkg, bump string, stage models.PRStage, detail string)
 	SetImplMeta(prNumber int, sessionID, worktreePath, branch string)
 	SetReplacementPR(prNumber, n int, replacementURL string)
+
+	// SetCheckpoint records (empty string clears) the resumable implementation-
+	// pipeline checkpoint blob for a known PR. No-op for an unknown PR. The blob
+	// is opaque to the store; the implementation package owns its shape. Written
+	// each time the pipeline yields with CI pending; cleared on terminal outcome.
+	SetCheckpoint(prNumber int, checkpoint string)
+
 	// Reap removes rows for any PR whose number is not in openPRs. It is called
 	// once per scan, keyed off the full set returned by GetDependabotPRs, so
 	// closed PRs disappear from the dashboard on the next scan cycle.

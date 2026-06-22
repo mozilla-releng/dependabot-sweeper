@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -409,8 +410,16 @@ func (p *Pipeline) setCI(prNumber int, ci models.CIStatus) {
 
 // RunResult holds the result of an implementation pipeline run.
 type RunResult struct {
-	Success       bool
-	GaveUp        bool // true when the loop gave up (no-progress / exhausted / time-cap); sticky at the SHA
+	Success bool
+	GaveUp  bool // true when the loop gave up (no-progress / exhausted / time-cap); sticky at the SHA
+
+	// InProgress is true when the pipeline yielded mid-flight with CI not yet
+	// settled (the daemon/level-triggered path): the worker's turn has pushed and
+	// a checkpoint was persisted, so a later scan resumes via Resume() instead of
+	// blocking the scan thread. NOT a terminal outcome — the orchestrator must
+	// neither un-draft the replacement PR nor record a terminal outcome for it.
+	InProgress bool
+
 	Detail        string
 	ReviewVerdict *models.ReviewVerdict
 	Branch        string
@@ -439,8 +448,19 @@ type RunResult struct {
 func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *models.AgentAnalysis) (result RunResult) {
 	branch := BuildBranchName(pr.PackageName, pr.NewVersion)
 	p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageImplStarting, "")
-	defer p.cleanup()
-	defer func() { result.TipSHA = p.bumpTipSHA }()
+	// Preserve the workdir + checkpoint across an InProgress yield (a later scan
+	// resumes via Resume); clean up and clear the checkpoint only on a terminal
+	// outcome. On the daemon (DataDir set) p.cleanup() is a no-op — reapClosed
+	// owns workdir deletion — but this keeps the one-shot path correct too.
+	defer func() {
+		result.TipSHA = p.bumpTipSHA
+		if !result.InProgress {
+			p.cleanup()
+			if p.store != nil {
+				p.store.SetCheckpoint(pr.Number, "")
+			}
+		}
+	}()
 
 	// Phase 0: Ensure the PR branch is up to date with base.
 	//
@@ -485,26 +505,16 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		return RunResult{Success: false, Detail: fmt.Sprintf("Clone/branch failed: %v", err)}
 	}
 
-	// Determine which CI failures are non-blocking for the success criterion.
-	// Q3 (DECIDED): base-branch suppression as a success criterion is dropped —
-	// a required check red on main is "more work," not an excuse. The agent must
-	// fix those failures too. Only the operator --ignore-check escape hatch remains.
+	// Operator-ignored CI checks — the only ones the success criterion won't gate
+	// on (Q3). Seeds the brief here; drive() uses it again to evaluate CI.
 	ignored := p.ignoredChecks()
 
-	// Required-status-check set for the base branch (Q7): when non-empty, only
-	// these checks gate the implementation's success criterion; empty falls back
-	// to all-checks (M2). Fetched once and reused across every CI-gate poll.
-	required := p.github.RequiredChecks(ctx, pr.BaseRef)
-
-	// Phase 3: orchestrator-owned implement → CI-fix → review loop (Bug #15).
-	//
-	// The worker is now a *bounded turn*: it makes the change, pushes, opens the
-	// draft PR, and exits — it never waits for or polls CI. The orchestrator owns
-	// the CI wait and the iteration. A single session UUID is pinned on the launch
-	// turn so every follow-up turn (--resume) preserves the worker's full context.
+	// The worker is a *bounded turn*: it makes the change, pushes, opens the draft
+	// PR, and exits — it never waits for or polls CI. The pipeline owns the CI
+	// wait and iteration. A single session UUID is pinned on the launch turn so
+	// every follow-up turn (--resume) preserves the worker's full context.
 	sessionID := newSessionID()
 	p.setImplMeta(pr.Number, sessionID, repoDir, branch)
-	start := time.Now()
 
 	var brief string
 	if pr.Grouped {
@@ -523,256 +533,376 @@ func (p *Pipeline) Run(ctx context.Context, pr models.DependabotPR, analysis *mo
 		return RunResult{Success: false, Detail: "worker launch turn failed", Branch: branch}
 	}
 
-	reviewRetriesLeft := p.config.MaxReviewRetries
-	var lastVerdict *models.ReviewVerdict
-	reviewTurn := 1 // incremented each time the reviewer runs (for its turn-number context)
+	// The launch turn pushed and opened the draft PR. Hand off to the resumable
+	// state machine: it owns the CI wait, the CI-fix/review loop, and finalisation.
+	// On the daemon it yields the scan thread whenever CI is pending (resumed by a
+	// later scan via Resume); on the one-shot path it blocks in-process.
+	cp := &checkpoint{
+		Phase:              phaseAwaitingImplCI,
+		Branch:             branch,
+		SessionID:          sessionID,
+		RepoDir:            repoDir,
+		Workdir:            p.workdir,
+		BumpTipSHA:         p.bumpTipSHA,
+		BaseHeadSHA:        pr.HeadSHA,
+		StartedAt:          time.Now(),
+		Iter:               1,
+		Floor:              math.MaxInt,
+		Stall:              0,
+		ReviewRetriesLeft:  p.config.MaxReviewRetries,
+		ReviewTurn:         1,
+		AgentJustification: p.agentJustification,
+		Analysis:           analysis,
+	}
+	return p.drive(ctx, pr, cp)
+}
+
+// postSquashCap bounds how long the pipeline waits for the squash+force-push CI
+// to settle before giving up and flagging for human attention (Bug #27). In the
+// level-triggered model this is wall-clock spanning scans.
+const postSquashCap = 30 * time.Minute
+
+// pipelinePhase identifies where a resumable implementation pipeline is parked.
+type pipelinePhase string
+
+const (
+	phaseAwaitingImplCI       pipelinePhase = "awaiting_impl_ci"
+	phaseAwaitingPostSquashCI pipelinePhase = "awaiting_postsquash_ci"
+)
+
+// checkpoint is the resumable state of an in-flight implementation pipeline,
+// persisted as an opaque JSON blob in pr_progress.pipeline_checkpoint (v3). A
+// later scan reconstructs it in Resume() and continues from cp.Phase rather than
+// re-cloning and re-running the combined agent. Everything the pipeline reads
+// after the launch turn lives here, so Run and Resume drive identically.
+type checkpoint struct {
+	Phase        pipelinePhase `json:"phase"`
+	Branch       string        `json:"branch"`
+	SessionID    string        `json:"session_id"`
+	RepoDir      string        `json:"repo_dir"`
+	Workdir      string        `json:"workdir"`
+	BumpTipSHA   string        `json:"bump_tip_sha"`
+	BaseHeadSHA  string        `json:"base_head_sha"` // pr.HeadSHA at launch; resume invalidates if it moves
+	StartedAt    time.Time     `json:"started_at"`    // bounds MaxImplTime across scans
+	PostSquashAt time.Time     `json:"post_squash_at,omitempty"`
+
+	// CI-fix loop counters. Reset on each review-fix cycle (mirrors the original
+	// per-outer-iteration lifetime of these locals).
+	Iter  int `json:"iter"`
+	Floor int `json:"floor"`
+	Stall int `json:"stall"`
+
+	// Review loop state.
+	ReviewRetriesLeft int                   `json:"review_retries_left"`
+	ReviewTurn        int                   `json:"review_turn"`
+	LastVerdict       *models.ReviewVerdict `json:"last_verdict,omitempty"`
+
+	// Carried so Resume reviews/finalises identically to Run (the reviewer reads
+	// ReviewBody/CodeChanges for context; curate reads the justification).
+	AgentJustification string                `json:"agent_justification,omitempty"`
+	Analysis           *models.AgentAnalysis `json:"analysis,omitempty"`
+}
+
+// CheckpointBaseHeadSHA extracts the base head SHA a persisted checkpoint blob
+// was built on, for resume-invalidation by the orchestrator (if the original
+// dependabot PR's head moved, the in-flight implementation is stale). Returns
+// ("", false) for an empty or unparseable blob.
+func CheckpointBaseHeadSHA(blob string) (string, bool) {
+	if blob == "" {
+		return "", false
+	}
+	var cp checkpoint
+	if err := json.Unmarshal([]byte(blob), &cp); err != nil {
+		return "", false
+	}
+	return cp.BaseHeadSHA, true
+}
+
+// Resume continues a mid-flight implementation pipeline from a persisted
+// checkpoint blob (the orchestrator validates it via CheckpointBaseHeadSHA
+// first). It does NOT re-clone or re-run the combined agent — it reuses the
+// preserved worktree, branch, and Claude session — and drives the state machine
+// from cp.Phase. The orchestrator constructs the Pipeline exactly as for Run
+// (NewPipeline + WithStore/WithLogDir/WithBareClone) before calling this.
+func (p *Pipeline) Resume(ctx context.Context, pr models.DependabotPR, checkpointJSON string) (result RunResult) {
+	var cp checkpoint
+	if err := json.Unmarshal([]byte(checkpointJSON), &cp); err != nil {
+		return RunResult{Success: false, Detail: fmt.Sprintf("could not parse pipeline checkpoint: %v", err)}
+	}
+	// Restore the fields the pipeline helpers read off the receiver directly.
+	p.workdir = cp.Workdir
+	p.bumpTipSHA = cp.BumpTipSHA
+	if p.agentJustification == "" {
+		p.agentJustification = cp.AgentJustification
+	}
+	defer func() {
+		result.TipSHA = p.bumpTipSHA
+		if !result.InProgress {
+			p.cleanup()
+			if p.store != nil {
+				p.store.SetCheckpoint(pr.Number, "")
+			}
+		}
+	}()
+	return p.drive(ctx, pr, &cp)
+}
+
+// drive is the resumable implementation state machine. Per call it performs at
+// most one unit of forward work — fetch CI, then either advance through the
+// review/finalise gates, run one CI-fix or review-fix worker turn, or detect a
+// terminal outcome — and waits for CI via park(). On the daemon (store set) park
+// persists the checkpoint and returns InProgress so the scan thread is freed and
+// a later scan resumes here; on the one-shot path (no store) park blocks ~30s
+// in-process and the loop re-evaluates, so the pipeline still runs to completion.
+// cp is mutated in place and persisted by park().
+func (p *Pipeline) drive(ctx context.Context, pr models.DependabotPR, cp *checkpoint) RunResult {
+	repoDir := cp.RepoDir
+	ignored := p.ignoredChecks()
+	// Required-status-check set for the base branch (Q7); empty falls back to
+	// all-checks (M2). Re-fetched per drive() (once per scan per in-flight PR).
+	required := p.github.RequiredChecks(ctx, pr.BaseRef)
 
 	for {
-		// CI-fix gate: wait for CI to SETTLE, then decide. Only a settled board
-		// that is still not acceptable (genuine terminal failures) resumes the
-		// worker; a board that hasn't settled (verifyCI timed out) means CI is
-		// still running — we keep waiting rather than resume the worker against
-		// pending checks it cannot fix (Bug #21). Bounded by MaxImplIterations
-		// (resume turns; iter only advances on an actual resume) and MaxImplTime.
-		// No-progress metric (Q12): floor = lowest blocking-check count seen so
-		// far (math.MaxInt = none yet); stall = consecutive settled attempts since
-		// the floor last improved.
-		floor := math.MaxInt
-		stall := 0
-		for iter := 1; ; {
-			ci, settled := p.verifyCI(ctx, branch, ignored)
-			// Update the dashboard's CI snapshot on every poll iteration so the
-			// drawer's CI bar tracks live progress through the impl loop.
-			p.setCI(pr.Number, ci)
-			// Q3: pass nil for baseFailures — genuine green is the bar;
-			// a required check red on main is not suppressed, it must be fixed.
-			acceptable, blocking := ci.AcceptableGiven(ignored, nil, required, time.Now(), p.config.CIStaleness)
-			if acceptable {
-				slog.Info("CI gate passed", "pr", pr.Number, "iter", iter)
-				break
+		// Generous wall-clock backstop (6h default), spanning scans. The primary
+		// cost guard is MaxImplBudget per worker turn; this only catches a pipeline
+		// that never settles (e.g. a perpetually-pending check before it goes stale).
+		if time.Since(cp.StartedAt).Seconds() >= float64(p.config.MaxImplTime) {
+			return RunResult{
+				Success: false, GaveUp: true, Branch: cp.Branch, ReviewVerdict: cp.LastVerdict,
+				Detail: fmt.Sprintf("implementation exceeded MaxImplTime (%ds)", p.config.MaxImplTime),
 			}
-			if !settled {
-				// CI hasn't finished — the remaining blockers are still running,
-				// not failures the worker can fix. Keep waiting; do NOT resume the
-				// worker and do NOT consume a fix-iteration. Bounded by MaxImplTime.
-				if ctx.Err() != nil || time.Since(start).Seconds() >= float64(p.config.MaxImplTime) {
-					return RunResult{
-						Success:       false,
-						GaveUp:        true,
-						Detail:        "CI did not settle within MaxImplTime (still pending: " + strings.Join(blocking, ", ") + ")",
-						ReviewVerdict: lastVerdict,
-						Branch:        branch,
-					}
+		}
+
+		ci, err := p.github.GetBranchCI(ctx, cp.Branch)
+		if err != nil {
+			slog.Warn("Could not fetch branch CI — will retry", "branch", cp.Branch, "error", err)
+			if r, done := p.park(ctx, pr, cp, "CI status unavailable — will retry"); done {
+				return r
+			}
+			continue
+		}
+		p.setCI(pr.Number, *ci)
+
+		// Empty-check guard: right after a push the new check runs may not be
+		// registered yet, and an empty set is vacuously "settled"/"green"
+		// (aggregateChecks → Total 0, State success). Never read zero checks as
+		// done — wait for them to appear.
+		if ci.Total == 0 {
+			if r, done := p.park(ctx, pr, cp, "waiting for CI checks to register"); done {
+				return r
+			}
+			continue
+		}
+
+		switch cp.Phase {
+		case phaseAwaitingImplCI:
+			settled, _ := ci.Settled(time.Now(), p.config.CIStaleness, ignored)
+			// Q3: pass nil for baseFailures — genuine green is the bar; a required
+			// check red on main is not suppressed, it must be fixed.
+			acceptable, blocking := ci.AcceptableGiven(ignored, nil, required, time.Now(), p.config.CIStaleness)
+
+			if acceptable {
+				slog.Info("CI gate passed", "pr", pr.Number, "iter", cp.Iter)
+				verdict, rerr := p.runReview(ctx, pr, cp, repoDir)
+				if rerr != nil {
+					slog.Error("Review failed", "error", rerr)
+					return RunResult{Success: false, Detail: fmt.Sprintf("Review agent error: %v", rerr), ReviewVerdict: cp.LastVerdict, Branch: cp.Branch}
 				}
-				p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageWaitingCI, "CI still running: "+strings.Join(blocking, ", "))
-				slog.Info("CI still running — waiting, not resuming worker", "pr", pr.Number, "stillBlocking", blocking)
+				if verdict.Verdict == "approve" {
+					if ferr := p.finalize(ctx, pr, cp, repoDir); ferr != nil {
+						slog.Error("Finalize (curate/squash) of impl branch failed", "pr", pr.Number, "error", ferr)
+						return RunResult{Success: false, Detail: fmt.Sprintf("finalize at approval failed: %v", ferr), ReviewVerdict: verdict, Branch: cp.Branch}
+					}
+					// Squash force-pushed → post-squash CI restarts (Bug #27). Park
+					// at the post-squash gate; the orchestrator un-drafts only on
+					// Success, so CI must be re-verified there before we return it.
+					cp.Phase = phaseAwaitingPostSquashCI
+					cp.PostSquashAt = time.Now()
+					cp.LastVerdict = verdict
+					if r, done := p.park(ctx, pr, cp, "waiting for post-squash CI"); done {
+						return r
+					}
+					continue
+				}
+				// request_changes: resume the SAME session with the reviewer's
+				// concerns. Bounded by MaxReviewRetries; the new code must still
+				// pass CI, so we re-enter the CI gate afterwards.
+				cp.LastVerdict = verdict
+				if cp.ReviewRetriesLeft <= 0 {
+					concerns := "see review"
+					if len(verdict.Concerns) > 0 {
+						concerns = strings.Join(verdict.Concerns, "; ")
+					}
+					return RunResult{Success: false, Detail: fmt.Sprintf("Review agent rejected after retries: %s", concerns), ReviewVerdict: verdict, Branch: cp.Branch}
+				}
+				cp.ReviewRetriesLeft--
+				cp.ReviewTurn++
+				slog.Info("Review agent rejected — resuming worker with concerns", "pr", pr.Number, "retriesLeft", cp.ReviewRetriesLeft)
+				p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageResuming, "review-fix")
+				if !p.runWorkerTurn(ctx, repoDir, cp.SessionID, buildReviewFeedback(verdict.Concerns), true, pr.Number) {
+					return RunResult{Success: false, Detail: "worker resume turn (review fix) failed", ReviewVerdict: verdict, Branch: cp.Branch}
+				}
+				// Review-fix pushed → re-enter the CI gate with a fresh CI-fix budget
+				// (mirrors the original outer loop resetting iter/floor/stall).
+				cp.Iter = 1
+				cp.Floor = math.MaxInt
+				cp.Stall = 0
+				if r, done := p.park(ctx, pr, cp, "awaiting CI after review-fix"); done {
+					return r
+				}
 				continue
 			}
-			// Settled but not acceptable → genuine terminal failures → resume the
-			// worker (bounded), feeding it only the real failing checks + logs.
-			verdict, reason := decideCIFixLoop(false, iter, p.config.MaxImplIterations,
-				time.Since(start).Seconds(), float64(p.config.MaxImplTime))
+
+			if !settled {
+				// CI hasn't finished — the remaining blockers are still running, not
+				// failures the worker can fix (Bug #21). Wait; don't consume an iter.
+				if r, done := p.park(ctx, pr, cp, "CI still running: "+strings.Join(blocking, ", ")); done {
+					return r
+				}
+				continue
+			}
+
+			// Settled but not acceptable → genuine terminal failures → CI-fix turn.
+			verdict, reason := decideCIFixLoop(false, cp.Iter, p.config.MaxImplIterations,
+				time.Since(cp.StartedAt).Seconds(), float64(p.config.MaxImplTime))
 			if verdict == ciFixGiveUp {
 				detail := "CI not acceptable: " + reason
 				if len(blocking) > 0 {
 					detail += " (blocking: " + strings.Join(blocking, ", ") + ")"
 				}
-				return RunResult{
-					Success:       false,
-					GaveUp:        true,
-					Detail:        detail,
-					ReviewVerdict: lastVerdict,
-					Branch:        branch,
-				}
+				return RunResult{Success: false, GaveUp: true, Detail: detail, ReviewVerdict: cp.LastVerdict, Branch: cp.Branch}
 			}
 			// No-progress guard (Q12): give up once the lowest failing-check count
 			// hasn't improved over MaxNoProgressIterations consecutive settled
-			// attempts. A monotonic floor (not a window over raw counts) so a
-			// worker that thrashes — fix A breaks B, fix B re-breaks A — can't keep
-			// the loop alive forever by oscillating the count; only an actual new
-			// low resets the stall. Subsumes the stationary and oscillating cases.
+			// attempts. A monotonic floor can't be gamed by up-down oscillation.
 			var giveUp bool
-			giveUp, floor, stall = decideNoProgress(len(blocking), floor, stall, p.config.MaxNoProgressIterations)
+			giveUp, cp.Floor, cp.Stall = decideNoProgress(len(blocking), cp.Floor, cp.Stall, p.config.MaxNoProgressIterations)
 			if giveUp {
 				names := strings.Join(blocking, ", ")
-				detail := fmt.Sprintf(
-					"Stopped: the failing-check count stalled at a floor of %d across %d fix attempts without improving (still red: %s) — likely pre-existing or beyond an automated bump fix. Flagging for review.",
-					floor, p.config.MaxNoProgressIterations, names,
-				)
-				slog.Info("No-progress give-up", "pr", pr.Number, "blocking", blocking, "floor", floor, "maxStall", p.config.MaxNoProgressIterations)
-				return RunResult{
-					Success:       false,
-					GaveUp:        true,
-					Detail:        detail,
-					ReviewVerdict: lastVerdict,
-					Branch:        branch,
-				}
+				detail := fmt.Sprintf("Stopped: the failing-check count stalled at a floor of %d across %d fix attempts without improving (still red: %s) — likely pre-existing or beyond an automated bump fix. Flagging for review.", cp.Floor, p.config.MaxNoProgressIterations, names)
+				slog.Info("No-progress give-up", "pr", pr.Number, "blocking", blocking, "floor", cp.Floor, "maxStall", p.config.MaxNoProgressIterations)
+				return RunResult{Success: false, GaveUp: true, Detail: detail, ReviewVerdict: cp.LastVerdict, Branch: cp.Branch}
 			}
-			slog.Info("CI not yet acceptable — resuming worker with failure logs",
-				"pr", pr.Number, "iter", iter, "blocking", blocking)
-			p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageResuming,
-				fmt.Sprintf("ci-fix iteration %d of %d", iter, p.config.MaxImplIterations))
-			logs := p.github.FetchBranchFailureLogs(ctx, ci, pr.Number)
-			if !p.runWorkerTurn(ctx, repoDir, sessionID, buildCIFeedback(blocking, logs), true, pr.Number) {
-				return RunResult{
-					Success:       false,
-					Detail:        "worker resume turn (CI fix) failed",
-					ReviewVerdict: lastVerdict,
-					Branch:        branch,
-				}
+			slog.Info("CI not yet acceptable — resuming worker with failure logs", "pr", pr.Number, "iter", cp.Iter, "blocking", blocking)
+			p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageResuming, fmt.Sprintf("ci-fix iteration %d of %d", cp.Iter, p.config.MaxImplIterations))
+			logs := p.github.FetchBranchFailureLogs(ctx, *ci, pr.Number)
+			if !p.runWorkerTurn(ctx, repoDir, cp.SessionID, buildCIFeedback(blocking, logs), true, pr.Number) {
+				return RunResult{Success: false, Detail: "worker resume turn (CI fix) failed", ReviewVerdict: cp.LastVerdict, Branch: cp.Branch}
 			}
-			iter++
-		}
+			cp.Iter++
+			if r, done := p.park(ctx, pr, cp, "awaiting CI after fix attempt"); done {
+				return r
+			}
+			continue
 
-		// Review gate. CI is acceptable; have the reviewer judge the change.
-		// Commit list is taken relative to the captured post-rebase bump tip —
-		// the agent's own work — not origin/<HeadRef> (M4 / MINOR-1).
-		// The reviewer runs as a claude subprocess with full tool access and reads
-		// the diff directly via git diff — no pre-fetched, size-capped diff needed.
-		commits := p.getBranchCommits(ctx, repoDir, p.bumpTipSHA)
-		messages := make([]string, len(commits))
-		for i, c := range commits {
-			messages[i] = c.Message
-		}
-
-		// Capture HEAD SHA for the reviewer brief so it knows the exact commit
-		// it is reviewing (the brief template includes HEAD: <sha>).
-		var headSHA string
-		if tipOut, tipErr := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output(); tipErr == nil {
-			headSHA = strings.TrimSpace(string(tipOut))
-		}
-
-		p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageReviewing, "")
-		verdict, err := p.reviewer.Review(
-			ctx,
-			repoDir, p.bumpTipSHA, branch,
-			p.workdir, headSHA,
-			analysis.ReviewBody, analysis.CodeChanges,
-			len(commits), messages,
-			reviewTurn,
-			p.agentJustification, // Q15: reviewer also evaluates justification (empty on legacy path)
-		)
-		if err != nil {
-			slog.Error("Review failed", "error", err)
-			return RunResult{
-				Success:       false,
-				Detail:        fmt.Sprintf("Review agent error: %v", err),
-				ReviewVerdict: lastVerdict,
-				Branch:        branch,
-			}
-		}
-
-		if verdict.Verdict == "approve" {
-			// Finalize: curate the commit history (Q13) if an agent justification is
-			// available (combined agent path), otherwise fall back to squashBranch
-			// (legacy analyser path). Both preserve the two-commit structure:
-			// bump commit + agent work. The bumpTipSHA MUST be the live post-rebase
-			// tip (T9) so neither operation bundles unrelated `main` changes.
-			var finalizeErr error
-			if p.agentJustification != "" {
-				// Q13 curate: the curate agent authors logical commits from the staged diff.
-				p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, "curating commit history")
-				finalizeErr = p.curateBranch(ctx, repoDir, p.bumpTipSHA, branch, p.agentJustification, pr.Number)
-			} else {
-				// Legacy path: single squash commit.
-				var agentMsg string
-				if pr.Grouped {
-					agentMsg = fmt.Sprintf("fix: update code for %s compatibility", pr.PackageName)
-				} else {
-					agentMsg = fmt.Sprintf("fix: update code for %s %s → %s compatibility",
-						pr.PackageName, pr.OldVersion, pr.NewVersion)
+		case phaseAwaitingPostSquashCI:
+			settled, _ := ci.Settled(time.Now(), p.config.CIStaleness, ignored)
+			if !settled {
+				if time.Since(cp.PostSquashAt) >= postSquashCap {
+					return RunResult{Success: false, GaveUp: true, Detail: "post-squash CI did not settle within 30 minutes", ReviewVerdict: cp.LastVerdict, Branch: cp.Branch}
 				}
-				finalizeErr = p.squashBranch(ctx, repoDir, p.bumpTipSHA, branch, agentMsg)
-			}
-			if finalizeErr != nil {
-				slog.Error("Finalize (curate/squash) of impl branch failed", "pr", pr.Number, "error", finalizeErr)
-				return RunResult{
-					Success:       false,
-					Detail:        fmt.Sprintf("finalize at approval failed: %v", finalizeErr),
-					ReviewVerdict: verdict,
-					Branch:        branch,
+				if r, done := p.park(ctx, pr, cp, "waiting for post-squash CI"); done {
+					return r
 				}
+				continue
 			}
-
-			// Post-squash CI re-verification (Bug #27): the squash+force-push
-			// restarts CI on the replacement branch. The orchestrator un-drafts the
-			// PR solely on result.Success, so we must verify CI is still acceptable
-			// here before returning Success — otherwise the PR is taken out of draft
-			// while post-squash CI is failing or pending.
-			//
-			// Cap at 30 minutes: if CI hasn't settled by then the branch needs human
-			// attention anyway. GaveUp=true so the orchestrator records a terminal
-			// outcome at this head SHA (no token burn on the next cycle).
-			p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageWaitingCI,
-				"waiting for post-squash CI")
-			const postSquashCap = 30 * time.Minute
-			postSquashCtx, cancelPostSquash := context.WithTimeout(ctx, postSquashCap)
-			defer cancelPostSquash()
-			postCI, postSettled := p.verifyCI(postSquashCtx, branch, ignored)
-			p.setCI(pr.Number, postCI)
-			if !postSettled {
-				return RunResult{
-					Success:       false,
-					GaveUp:        true,
-					Detail:        "post-squash CI did not settle within 30 minutes",
-					ReviewVerdict: verdict,
-					Branch:        branch,
-				}
+			acceptable, blocking := ci.AcceptableGiven(ignored, nil, required, time.Now(), p.config.CIStaleness)
+			if !acceptable {
+				return RunResult{Success: false, GaveUp: true, Detail: "post-squash CI not acceptable: " + strings.Join(blocking, ", "), ReviewVerdict: cp.LastVerdict, Branch: cp.Branch}
 			}
-			// Q3: pass nil for baseFailures — genuine green is the bar.
-			postAcceptable, postBlocking := postCI.AcceptableGiven(ignored, nil, required, time.Now(), p.config.CIStaleness)
-			if !postAcceptable {
-				return RunResult{
-					Success:       false,
-					GaveUp:        true,
-					Detail:        "post-squash CI not acceptable: " + strings.Join(postBlocking, ", "),
-					ReviewVerdict: verdict,
-					Branch:        branch,
-				}
-			}
-
 			p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, "implementation complete and review approved")
-			return RunResult{
-				Success:       true,
-				Detail:        "Implementation complete and review approved",
-				ReviewVerdict: verdict,
-				Branch:        branch,
-				Justification: p.agentJustification, // Q15: propagate for posting to replacement PR body
-			}
-		}
+			return RunResult{Success: true, Detail: "Implementation complete and review approved", ReviewVerdict: cp.LastVerdict, Branch: cp.Branch, Justification: p.agentJustification}
 
-		// request_changes: resume the SAME session with the reviewer's concerns
-		// (preserving context) rather than rebuilding a fresh brief. Bounded by
-		// MaxReviewRetries; after a review-fix turn we re-enter the CI gate, since
-		// the new code must still pass CI.
-		lastVerdict = verdict
-		if reviewRetriesLeft <= 0 {
-			concerns := "see review"
-			if len(verdict.Concerns) > 0 {
-				concerns = strings.Join(verdict.Concerns, "; ")
-			}
-			return RunResult{
-				Success:       false,
-				Detail:        fmt.Sprintf("Review agent rejected after retries: %s", concerns),
-				ReviewVerdict: verdict,
-				Branch:        branch,
-			}
+		default:
+			return RunResult{Success: false, Detail: "unknown pipeline phase: " + string(cp.Phase), Branch: cp.Branch}
 		}
-		reviewRetriesLeft--
-		reviewTurn++
-		slog.Info("Review agent rejected — resuming worker with concerns",
-			"pr", pr.Number, "retriesLeft", reviewRetriesLeft)
-		p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageResuming, "review-fix")
-		if !p.runWorkerTurn(ctx, repoDir, sessionID, buildReviewFeedback(verdict.Concerns), true, pr.Number) {
-			return RunResult{
-				Success:       false,
-				Detail:        "worker resume turn (review fix) failed",
-				ReviewVerdict: verdict,
-				Branch:        branch,
-			}
-		}
-		// Loop: re-enter the CI gate with the review-fix changes.
 	}
+}
+
+// park waits for CI to make progress before drive() re-evaluates. On the daemon
+// (store set) it persists the checkpoint and returns (result, true) with
+// InProgress so the caller yields the scan thread — a later scan resumes via
+// Resume(). On the one-shot path (no store, nothing to resume it) it blocks ~30s
+// in-process and returns (_, false) so drive() loops and re-evaluates, running to
+// completion. Honours context cancellation in both modes.
+func (p *Pipeline) park(ctx context.Context, pr models.DependabotPR, cp *checkpoint, detail string) (RunResult, bool) {
+	p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageWaitingCI, detail)
+	if p.store != nil {
+		p.persistCheckpoint(pr.Number, cp)
+		return RunResult{InProgress: true, Branch: cp.Branch}, true
+	}
+	select {
+	case <-ctx.Done():
+		return RunResult{Success: false, Detail: "implementation cancelled while waiting for CI", Branch: cp.Branch}, true
+	case <-time.After(30 * time.Second):
+		return RunResult{}, false
+	}
+}
+
+// persistCheckpoint serialises cp and stores it so a later scan can resume.
+// No-op without a store (the one-shot path runs to completion in one process).
+func (p *Pipeline) persistCheckpoint(prNumber int, cp *checkpoint) {
+	if p.store == nil {
+		return
+	}
+	blob, err := json.Marshal(cp)
+	if err != nil {
+		slog.Error("could not marshal pipeline checkpoint", "pr", prNumber, "error", err)
+		return
+	}
+	p.store.SetCheckpoint(prNumber, string(blob))
+}
+
+// runReview runs the review gate (logic unchanged from the original inline gate,
+// extracted so Run and Resume share it). The reviewer reads the diff via git; the
+// assessment fields (ReviewBody/CodeChanges, carried in the checkpoint) are context.
+func (p *Pipeline) runReview(ctx context.Context, pr models.DependabotPR, cp *checkpoint, repoDir string) (*models.ReviewVerdict, error) {
+	// Commit list relative to the captured post-rebase bump tip — the agent's own
+	// work, not origin/<HeadRef> (M4 / MINOR-1).
+	commits := p.getBranchCommits(ctx, repoDir, cp.BumpTipSHA)
+	messages := make([]string, len(commits))
+	for i, c := range commits {
+		messages[i] = c.Message
+	}
+	// Capture HEAD SHA so the reviewer brief names the exact commit it reviews.
+	var headSHA string
+	if tipOut, tipErr := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output(); tipErr == nil {
+		headSHA = strings.TrimSpace(string(tipOut))
+	}
+	var reviewBody string
+	var codeChanges []models.CodeChangeEntry
+	if cp.Analysis != nil {
+		reviewBody = cp.Analysis.ReviewBody
+		codeChanges = cp.Analysis.CodeChanges
+	}
+	p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageReviewing, "")
+	return p.reviewer.Review(
+		ctx,
+		repoDir, cp.BumpTipSHA, cp.Branch,
+		cp.Workdir, headSHA,
+		reviewBody, codeChanges,
+		len(commits), messages,
+		cp.ReviewTurn,
+		p.agentJustification, // Q15: reviewer also evaluates justification (empty on legacy path)
+	)
+}
+
+// finalize curates (Q13, when a justification is present) or squashes (legacy
+// path) the impl branch at approval, preserving the two-commit structure (bump +
+// agent work). bumpTipSHA MUST be the live post-rebase tip (T9). Force-pushes;
+// the caller then waits for post-squash CI before returning Success.
+func (p *Pipeline) finalize(ctx context.Context, pr models.DependabotPR, cp *checkpoint, repoDir string) error {
+	if p.agentJustification != "" {
+		p.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, "curating commit history")
+		return p.curateBranch(ctx, repoDir, cp.BumpTipSHA, cp.Branch, p.agentJustification, pr.Number)
+	}
+	var agentMsg string
+	if pr.Grouped {
+		agentMsg = fmt.Sprintf("fix: update code for %s compatibility", pr.PackageName)
+	} else {
+		agentMsg = fmt.Sprintf("fix: update code for %s %s → %s compatibility", pr.PackageName, pr.OldVersion, pr.NewVersion)
+	}
+	return p.squashBranch(ctx, repoDir, cp.BumpTipSHA, cp.Branch, agentMsg)
 }
 
 // ignoredChecks returns the set of operator-ignored CI check names from
@@ -1196,49 +1326,6 @@ func decideNoProgress(blockingCount, floor, stall, maxStall int) (giveUp bool, n
 	}
 	stall++ // no improvement (equal or worse)
 	return stall >= maxStall, floor, stall
-}
-
-// verifyCI waits until the branch's CI has SETTLED (every check terminal or
-// stale) and returns the settled status with settled=true. If it can't reach a
-// settled state within maxWait (or the context is cancelled), it returns the
-// last snapshot with settled=false — the caller MUST treat that as "CI still
-// running", not as failures to fix (Bug #21). It waits for Settled() — NOT
-// merely until the aggregate State stops being "pending" — because State flips
-// to "failure" the instant one check fails (e.g. meta-changelog-pr fails
-// immediately on forks), which would otherwise return with most checks still
-// running. Settled() is the same generic per-check logic as the orchestrator's
-// Step 3 gate (Spec A / Bug #18).
-func (p *Pipeline) verifyCI(ctx context.Context, branch string, ignored map[string]bool) (models.CIStatus, bool) {
-	slog.Info("Independently verifying CI", "branch", branch)
-	// Generous cap: the fork's slow checks (generic-worker macOS/Windows) can
-	// take a while; we return as soon as CI is SETTLED, so this is only an upper
-	// bound, not a fixed wait.
-	maxWait := time.Duration(p.config.CIVerifyMaxWait) * time.Second
-	start := time.Now()
-	last := models.CIStatus{State: "pending"}
-	for time.Since(start) < maxWait {
-		if err := ctx.Err(); err != nil {
-			slog.Warn("CI verification cancelled", "error", err)
-			return last, false
-		}
-		if ci, err := p.github.GetBranchCI(ctx, branch); err == nil {
-			last = *ci
-			if settled, pending := ci.Settled(time.Now(), p.config.CIStaleness, ignored); settled {
-				slog.Info("CI verification complete (settled)", "state", ci.State, "passed", ci.Passed, "total", ci.Total)
-				return *ci, true
-			} else {
-				slog.Info("CI not settled — waiting", "branch", branch,
-					"stillPending", len(pending), "elapsed", time.Since(start).Round(time.Second).String())
-			}
-		}
-		select {
-		case <-ctx.Done():
-			return last, false
-		case <-time.After(30 * time.Second):
-		}
-	}
-	slog.Warn("CI verification timed out (not settled)", "seconds", maxWait.Seconds())
-	return last, false
 }
 
 // getBranchCommits lists the agent's commits on top of baseSHA (the captured

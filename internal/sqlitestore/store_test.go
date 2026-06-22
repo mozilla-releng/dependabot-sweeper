@@ -456,6 +456,73 @@ func TestSchemaVersion(t *testing.T) {
 	}
 }
 
+// — pipeline checkpoint (v3) —
+
+func TestSetCheckpointRoundTripAndClear(t *testing.T) {
+	s := openWriter(t)
+	s.Report(99, "pkg", "minor", models.StagePending, "")
+
+	blob := `{"phase":"awaiting_impl_ci","iter":3,"branch":"auto/fix/pkg-1.2.3"}`
+	s.SetCheckpoint(99, blob)
+	got, ok := s.Get(99)
+	if !ok {
+		t.Fatal("Get(99) not found")
+	}
+	if got.PipelineCheckpoint != blob {
+		t.Fatalf("PipelineCheckpoint = %q, want %q", got.PipelineCheckpoint, blob)
+	}
+
+	// Empty string clears it (terminal outcome path).
+	s.SetCheckpoint(99, "")
+	got, _ = s.Get(99)
+	if got.PipelineCheckpoint != "" {
+		t.Fatalf("after clear PipelineCheckpoint = %q, want empty", got.PipelineCheckpoint)
+	}
+}
+
+func TestSetCheckpointUnknownPRIsNoop(t *testing.T) {
+	s := openWriter(t)
+	s.SetCheckpoint(12345, `{"phase":"x"}`) // unknown PR: UPDATE touches zero rows
+	if _, ok := s.Get(12345); ok {
+		t.Fatal("SetCheckpoint must not create a row for an unknown PR")
+	}
+}
+
+// TestMigrateV2ToV3AddsCheckpointColumn exercises the v2→v3 migration on an
+// existing database — the production DB is at v2, so this path runs on the next
+// deploy. We create a v3 DB, rewind it to look like a v2 DB (drop the checkpoint
+// column, stamp user_version=2), then reopen and assert migrate() re-adds the
+// column and the checkpoint round-trips end-to-end.
+func TestMigrateV2ToV3AddsCheckpointColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+	s := openAt(t, path, true)
+	if _, err := s.db.Exec(`ALTER TABLE pr_progress DROP COLUMN pipeline_checkpoint`); err != nil {
+		t.Fatalf("drop column to simulate v2 schema: %v", err)
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("set user_version=2: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen — migrate() must ALTER ADD the column and stamp v3.
+	s2 := openAt(t, path, true)
+	var version int
+	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatalf("read user_version: %v", err)
+	}
+	if version != currentSchemaVersion {
+		t.Fatalf("after migrate user_version = %d, want %d", version, currentSchemaVersion)
+	}
+	s2.Report(7, "pkg", "minor", models.StagePending, "")
+	s2.SetCheckpoint(7, `{"phase":"awaiting_impl_ci"}`)
+	got, ok := s2.Get(7)
+	if !ok || got.PipelineCheckpoint != `{"phase":"awaiting_impl_ci"}` {
+		t.Fatalf("checkpoint round-trip after migrate: ok=%v got=%q", ok, got.PipelineCheckpoint)
+	}
+}
+
 // — SetOutcome round-trip —
 
 func TestSetOutcomeRoundTrip(t *testing.T) {

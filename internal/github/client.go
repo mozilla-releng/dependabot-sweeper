@@ -758,21 +758,23 @@ func (c *Client) UpdatePRBody(ctx context.Context, prNumber int, body string) er
 	return nil
 }
 
-// FindPRByBranch finds an open PR whose head branch matches branch. Returns
-// the PR number and whether one was found.
-func (c *Client) FindPRByBranch(ctx context.Context, branch string) (int, bool, error) {
+// FindPRByBranch finds an open PR whose head branch matches branch. Returns the
+// PR number, whether one was found, and whether it is still a draft. The draft
+// flag distinguishes a completed replacement (ready for review) from an
+// incomplete one the implementation pipeline opened but has not finalised.
+func (c *Client) FindPRByBranch(ctx context.Context, branch string) (number int, found, isDraft bool, err error) {
 	pulls, _, err := c.gh.PullRequests.List(ctx, c.owner, c.repoName,
 		&github.PullRequestListOptions{
 			State: "open",
 			Head:  fmt.Sprintf("%s:%s", c.owner, branch),
 		})
 	if err != nil {
-		return 0, false, fmt.Errorf("listing PRs for branch %s: %w", branch, err)
+		return 0, false, false, fmt.Errorf("listing PRs for branch %s: %w", branch, err)
 	}
 	if len(pulls) == 0 {
-		return 0, false, nil
+		return 0, false, false, nil
 	}
-	return pulls[0].GetNumber(), true, nil
+	return pulls[0].GetNumber(), true, pulls[0].GetDraft(), nil
 }
 
 // ClosePRWithComment adds a comment to a PR and then closes it.

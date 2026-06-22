@@ -420,6 +420,13 @@ type PRProgress struct {
 	// a DB lookup instead of reading back a PR comment.
 	HeadSHA string `json:"head_sha,omitempty"`
 	Outcome string `json:"outcome,omitempty"`
+
+	// PipelineCheckpoint is the opaque JSON blob recording resumable
+	// implementation-pipeline state while a replacement-PR implementation is
+	// mid-flight (empty otherwise). Internal: it carries a Claude session ID and
+	// a local server path, so like SessionID/WorktreePath it is NOT serialised to
+	// the public dashboard. The implementation package owns its shape.
+	PipelineCheckpoint string `json:"-"`
 }
 
 // AgentOutcome is the combined agent's routing decision.

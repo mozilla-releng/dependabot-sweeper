@@ -73,7 +73,7 @@ func Open(path string, writer bool) (*Store, error) {
 
 // currentSchemaVersion is the schema version stamped into PRAGMA user_version.
 // Increment this and add a migration block to migrate() when the schema changes.
-const currentSchemaVersion = 2
+const currentSchemaVersion = 3
 
 // migrate stamps user_version on a fresh DB and runs any incremental migrations
 // for DBs created by older versions of the binary.
@@ -99,6 +99,14 @@ func migrate(db *sql.DB) error {
 				if _, err := db.Exec(col); err != nil {
 					return fmt.Errorf("migrate v1→v2: %w", err)
 				}
+			}
+		}
+		if version < 3 {
+			// v2 → v3: add the resumable pipeline checkpoint blob.
+			if _, err := db.Exec(
+				`ALTER TABLE pr_progress ADD COLUMN pipeline_checkpoint TEXT NOT NULL DEFAULT ''`,
+			); err != nil {
+				return fmt.Errorf("migrate v2→v3: %w", err)
 			}
 		}
 		// Future migrations: add "if version < N { ... }" blocks here.
@@ -175,6 +183,17 @@ func (s *Store) SetImplMeta(prNumber int, sessionID, worktreePath, branch string
 		SET session_id=?, worktree_path=?, impl_branch=?, last_updated=?
 		WHERE pr_number=?`,
 		sessionID, worktreePath, branch, now, prNumber,
+	)
+}
+
+// SetCheckpoint records (or, with an empty string, clears) the resumable
+// implementation-pipeline checkpoint blob for a known PR. No-op for an unknown
+// PR. The blob is opaque to the store: the implementation package owns its shape.
+func (s *Store) SetCheckpoint(prNumber int, checkpoint string) {
+	now := toUnixNano(time.Now())
+	_, _ = s.db.Exec(`
+		UPDATE pr_progress SET pipeline_checkpoint=?, last_updated=? WHERE pr_number=?`,
+		checkpoint, now, prNumber,
 	)
 }
 
@@ -329,7 +348,7 @@ func (s *Store) Get(prNumber int) (models.PRProgress, bool) {
 		       session_id, worktree_path, impl_branch, replacement_pr, last_updated,
 		       old_version, new_version, ecosystem, pr_url, replacement_pr_url,
 		       ci_state, ci_total, ci_passed, ci_failed, ci_pending, analysis_json,
-		       head_sha, outcome
+		       head_sha, outcome, pipeline_checkpoint
 		FROM pr_progress WHERE pr_number=?`, prNumber)
 
 	p, err := scanProgress(row)
@@ -357,7 +376,7 @@ func (s *Store) All() []models.PRProgress {
 		       session_id, worktree_path, impl_branch, replacement_pr, last_updated,
 		       old_version, new_version, ecosystem, pr_url, replacement_pr_url,
 		       ci_state, ci_total, ci_passed, ci_failed, ci_pending, analysis_json,
-		       head_sha, outcome
+		       head_sha, outcome, pipeline_checkpoint
 		FROM pr_progress ORDER BY pr_number`)
 	if err != nil {
 		return []models.PRProgress{}
@@ -457,7 +476,7 @@ func scanProgress(row scanner) (models.PRProgress, error) {
 		&p.SessionID, &p.WorktreePath, &p.ImplBranch, &replPR, &nanos,
 		&p.OldVersion, &p.NewVersion, &p.Ecosystem, &p.URL, &p.ReplacementPRURL,
 		&ciState, &ciTotal, &ciPassed, &ciFailed, &ciPending, &analysisJSON,
-		&p.HeadSHA, &p.Outcome,
+		&p.HeadSHA, &p.Outcome, &p.PipelineCheckpoint,
 	)
 	if err != nil {
 		return p, err

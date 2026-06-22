@@ -1,4 +1,4 @@
--- schema version 2
+-- schema version 3
 
 CREATE TABLE IF NOT EXISTS pr_progress (
     pr_number      INTEGER PRIMARY KEY,
@@ -34,7 +34,14 @@ CREATE TABLE IF NOT EXISTS pr_progress (
     -- head_sha skips re-processing via a DB lookup instead of reading back a
     -- PR comment (Bug #23).
     head_sha       TEXT    NOT NULL DEFAULT '',
-    outcome        TEXT    NOT NULL DEFAULT ''
+    outcome        TEXT    NOT NULL DEFAULT '',
+
+    -- resumable implementation pipeline checkpoint as an opaque JSON blob (v3).
+    -- Non-empty while a replacement-PR implementation is mid-flight; the
+    -- orchestrator reads it to resume the pipeline on the next scan instead of
+    -- re-running the combined agent. Cleared when the pipeline reaches a terminal
+    -- outcome. Opaque to the store — the implementation package owns the shape.
+    pipeline_checkpoint TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS stage_events (

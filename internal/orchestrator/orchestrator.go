@@ -447,6 +447,28 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		}
 	}
 
+	// Resume an in-flight implementation. If a prior scan left a pipeline
+	// checkpoint (a replacement-PR implementation that yielded with CI pending)
+	// and it is still valid (built on the current head), resume it directly —
+	// bypassing the original-PR CI gate, the SHA-idempotency gate, and the
+	// (expensive) combined agent, and reusing the preserved worktree + Claude
+	// session rather than re-cloning. This is the level-triggered counterpart to
+	// the pipeline yielding the scan thread while CI is pending. Skipped in
+	// dry-run and without a store (the one-shot path runs to completion in one go).
+	if o.store != nil && !o.dryRun {
+		if stored, ok := o.store.Get(pr.Number); ok && stored.Outcome == "" && stored.PipelineCheckpoint != "" {
+			if base, valid := implementation.CheckpointBaseHeadSHA(stored.PipelineCheckpoint); valid && base == pr.HeadSHA {
+				slog.Info("Resuming in-flight implementation pipeline", "pr", pr.Number)
+				result := o.newImplementationPipeline().Resume(ctx, pr, stored.PipelineCheckpoint)
+				return o.handlePipelineResult(ctx, pr, result)
+			}
+			// Stale checkpoint (original PR head moved, or unparseable): discard it
+			// and fall through to fresh processing against the new head.
+			slog.Info("Discarding stale pipeline checkpoint — original PR head moved or invalid", "pr", pr.Number)
+			o.store.SetCheckpoint(pr.Number, "")
+		}
+	}
+
 	// CI indeterminate: getCIStatus returns State "unknown" only when the check
 	// runs couldn't be fetched (API error). Do NOT proceed — an empty/partial
 	// check set is vacuously "settled" and would read as green, which on this
@@ -925,40 +947,16 @@ func (o *Orchestrator) actOnAnalysis(ctx context.Context, pr models.DependabotPR
 			}
 		}
 
-		// Idempotency: if a replacement PR is already open for this branch, skip
-		// the pipeline — the prior run succeeded and we don't want to re-run the
-		// agent on an already-complete PR (Bug #19).
+		// Idempotency (Bug #19, draft-aware) — see handleExistingReplacement and
+		// the matching comment on the combined-agent path.
 		expectedBranch := implementation.BuildBranchName(pr.PackageName, pr.NewVersion)
-		if existingN, exists, err := o.github.FindPRByBranch(ctx, expectedBranch); err != nil {
+		if existingN, exists, isDraft, err := o.github.FindPRByBranch(ctx, expectedBranch); err != nil {
 			slog.Warn("could not check for existing replacement PR", "pr", pr.Number, "error", err)
 		} else if exists {
-			slog.Info("replacement PR already exists — skipping pipeline", "pr", pr.Number, "replacement", existingN)
-			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, fmt.Sprintf("replacement PR #%d already exists", existingN))
-			o.reportReplacement(pr.Number, existingN, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, existingN))
-			o.recordCreatedPR(existingN, pr.Number) // ensure our own PR is excluded even if found pre-existing (Q14)
-			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
-			return models.ReviewResult{
-				PRNumber:            pr.Number,
-				PackageName:         pr.PackageName,
-				OldVersion:          pr.OldVersion,
-				NewVersion:          pr.NewVersion,
-				Action:              models.ActionReplacementPR,
-				Detail:              fmt.Sprintf("Replacement PR #%d already exists", existingN),
-				ReplacementPRNumber: &existingN,
-				Success:             true,
-			}
+			return o.handleExistingReplacement(ctx, pr, existingN, isDraft)
 		}
 
-		pipeline := implementation.NewPipeline(o.config, o.github)
-		if o.store != nil {
-			pipeline.WithStore(o.store)
-		}
-		if o.logDir != "" {
-			pipeline.WithLogDir(o.logDir)
-		}
-		if o.bareClonePath != "" {
-			pipeline.WithBareClone(o.bareClonePath)
-		}
+		pipeline := o.newImplementationPipeline()
 		result := pipeline.Run(ctx, pr, analysis)
 		return o.handlePipelineResult(ctx, pr, result)
 	}
@@ -1105,40 +1103,19 @@ func (o *Orchestrator) actOnAgentVerdict(
 			}
 		}
 
-		// Idempotency: if a replacement PR is already open for this branch, skip
-		// the pipeline — the prior run succeeded and we don't want to re-run the
-		// agent on an already-complete PR (Bug #19).
+		// Idempotency (Bug #19, draft-aware): if a replacement PR is already open
+		// for this branch, don't re-run the pipeline. A resumable in-flight one was
+		// already handled by the resume branch in processPR, so reaching here means
+		// no checkpoint survived — a ready PR is complete (skip), a draft is an
+		// orphaned incomplete attempt (flag). See handleExistingReplacement.
 		expectedBranch := implementation.BuildBranchName(pr.PackageName, pr.NewVersion)
-		if existingN, exists, err := o.github.FindPRByBranch(ctx, expectedBranch); err != nil {
+		if existingN, exists, isDraft, err := o.github.FindPRByBranch(ctx, expectedBranch); err != nil {
 			slog.Warn("could not check for existing replacement PR", "pr", pr.Number, "error", err)
 		} else if exists {
-			slog.Info("replacement PR already exists — skipping pipeline", "pr", pr.Number, "replacement", existingN)
-			o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, fmt.Sprintf("replacement PR #%d already exists", existingN))
-			o.reportReplacement(pr.Number, existingN, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, existingN))
-			o.recordCreatedPR(existingN, pr.Number)
-			o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
-			return models.ReviewResult{
-				PRNumber:            pr.Number,
-				PackageName:         pr.PackageName,
-				OldVersion:          pr.OldVersion,
-				NewVersion:          pr.NewVersion,
-				Action:              models.ActionReplacementPR,
-				Detail:              fmt.Sprintf("Replacement PR #%d already exists", existingN),
-				ReplacementPRNumber: &existingN,
-				Success:             true,
-			}
+			return o.handleExistingReplacement(ctx, pr, existingN, isDraft)
 		}
 
-		pipeline := implementation.NewPipeline(o.config, o.github)
-		if o.store != nil {
-			pipeline.WithStore(o.store)
-		}
-		if o.logDir != "" {
-			pipeline.WithLogDir(o.logDir)
-		}
-		if o.bareClonePath != "" {
-			pipeline.WithBareClone(o.bareClonePath)
-		}
+		pipeline := o.newImplementationPipeline()
 		// Pass the already-prepared workdir so the pipeline can skip re-cloning.
 		if workdir != "" {
 			pipeline.WithWorkdir(workdir)
@@ -1172,6 +1149,68 @@ func (o *Orchestrator) actOnAgentVerdict(
 	}
 }
 
+// newImplementationPipeline constructs an implementation pipeline wired with the
+// orchestrator's store, log dir, and bare clone. Callers add WithWorkdir /
+// WithAgentJustification as needed. Shared by the needs_changes paths and the
+// resume branch in processPR.
+func (o *Orchestrator) newImplementationPipeline() *implementation.Pipeline {
+	pipeline := implementation.NewPipeline(o.config, o.github)
+	if o.store != nil {
+		pipeline.WithStore(o.store)
+	}
+	if o.logDir != "" {
+		pipeline.WithLogDir(o.logDir)
+	}
+	if o.bareClonePath != "" {
+		pipeline.WithBareClone(o.bareClonePath)
+	}
+	return pipeline
+}
+
+// handleExistingReplacement decides what to do when a replacement PR already
+// exists for this dependabot PR's branch (Bug #19 idempotency), now draft-aware.
+// A ready (non-draft) PR is a completed prior run → record the pairing and skip.
+// A DRAFT is an incomplete replacement the pipeline opened but never finalised
+// AND for which no resumable checkpoint survived — the resume branch in
+// processPR runs first and would have continued a resumable one, so reaching
+// here with a draft means the state is gone. Flag it for a human rather than
+// falsely recording it as finalised (which would un-block nothing and hide an
+// unreviewed draft). Both paths record the created PR (reap-exempt, Q14).
+func (o *Orchestrator) handleExistingReplacement(ctx context.Context, pr models.DependabotPR, existingN int, isDraft bool) models.ReviewResult {
+	url := fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, existingN)
+	o.reportReplacement(pr.Number, existingN, url)
+	o.recordCreatedPR(existingN, pr.Number)
+	if isDraft {
+		detail := fmt.Sprintf("incomplete replacement PR #%d exists with no resumable state — needs human attention", existingN)
+		slog.Warn("existing replacement PR is an incomplete draft — flagging", "pr", pr.Number, "replacement", existingN)
+		o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFlagged, detail)
+		o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFlagged)
+		return models.ReviewResult{
+			PRNumber:            pr.Number,
+			PackageName:         pr.PackageName,
+			OldVersion:          pr.OldVersion,
+			NewVersion:          pr.NewVersion,
+			Action:              models.ActionFlaggedForHuman,
+			Detail:              detail,
+			ReplacementPRNumber: &existingN,
+			Success:             true,
+		}
+	}
+	slog.Info("replacement PR already exists (ready) — skipping pipeline", "pr", pr.Number, "replacement", existingN)
+	o.reportStage(pr.Number, pr.PackageName, string(pr.BumpType), models.StageFinalized, fmt.Sprintf("replacement PR #%d already exists", existingN))
+	o.recordOutcome(pr.Number, pr.HeadSHA, models.StageFinalized)
+	return models.ReviewResult{
+		PRNumber:            pr.Number,
+		PackageName:         pr.PackageName,
+		OldVersion:          pr.OldVersion,
+		NewVersion:          pr.NewVersion,
+		Action:              models.ActionReplacementPR,
+		Detail:              fmt.Sprintf("Replacement PR #%d already exists", existingN),
+		ReplacementPRNumber: &existingN,
+		Success:             true,
+	}
+}
+
 // handlePipelineResult processes the result of an implementation pipeline run,
 // shared between actOnAnalysis (legacy) and actOnAgentVerdict (combined agent).
 func (o *Orchestrator) handlePipelineResult(ctx context.Context, pr models.DependabotPR, result implementation.RunResult) models.ReviewResult {
@@ -1180,10 +1219,40 @@ func (o *Orchestrator) handlePipelineResult(ctx context.Context, pr models.Depen
 	var hasReplacement bool
 	if result.Branch != "" {
 		var findErr error
-		replacementNumber, hasReplacement, findErr = o.github.FindPRByBranch(ctx, result.Branch)
+		replacementNumber, hasReplacement, _, findErr = o.github.FindPRByBranch(ctx, result.Branch)
 		if findErr != nil {
 			slog.Warn("failed to look up replacement PR", "branch", result.Branch, "error", findErr)
 		}
+	}
+
+	// InProgress: the pipeline yielded with CI still pending (daemon path). A
+	// draft replacement PR may already exist from the launch turn; record the
+	// pairing (and the reap-exempt created-PR record, Q14) so the dashboard shows
+	// it and cost-safety holds. Do NOT un-draft, close the original, or record a
+	// terminal outcome — a later scan resumes the pipeline from its persisted
+	// checkpoint. The pipeline already reported the live stage (waiting_ci/resuming).
+	if result.InProgress {
+		if hasReplacement {
+			o.reportReplacement(pr.Number, replacementNumber, fmt.Sprintf("https://github.com/%s/pull/%d", o.repo, replacementNumber))
+			o.recordCreatedPR(replacementNumber, pr.Number)
+		}
+		detail := result.Detail
+		if detail == "" {
+			detail = "implementation in progress — awaiting CI"
+		}
+		res := models.ReviewResult{
+			PRNumber:    pr.Number,
+			PackageName: pr.PackageName,
+			OldVersion:  pr.OldVersion,
+			NewVersion:  pr.NewVersion,
+			Action:      models.ActionSkippedPending,
+			Detail:      detail,
+			Success:     true,
+		}
+		if hasReplacement {
+			res.ReplacementPRNumber = &replacementNumber
+		}
+		return res
 	}
 
 	if result.Success && hasReplacement {

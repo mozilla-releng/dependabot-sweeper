@@ -1,5 +1,10 @@
-// Package analyser calls Claude to review a dependabot PR and produce
-// a structured analysis of upstream changes and codebase impact.
+// Package analyser calls Claude via the Anthropic SDK to review a dependabot
+// PR and produce a structured analysis of upstream changes and codebase impact.
+//
+// Deprecated: this is the legacy analysis path, used only when the
+// --legacy-analyser flag is set. The default path uses [internal/agent], a
+// combined analyse-and-decide subprocess agent that replaces the separate
+// SDK-based analyser.
 package analyser
 
 import (

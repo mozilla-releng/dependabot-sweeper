@@ -43,7 +43,7 @@ These hold for every code change, agent prompt, and GitHub interaction.
    tool's *operators* have a separate admin dashboard; see `docs/DASHBOARD.md`. That is an
    observability surface, not a channel to maintainers.)
 
-3. **Idempotency is a cost-safety invariant.** The tool runs on a cron cycle; "no change since last
+3. **Idempotency is a cost-safety invariant.** The tool runs on a scan cycle; "no change since last
    cycle" must be a true no-op — no duplicate comments, reviews, or actions, and no stage-history
    noise. Crucially, every engaged PR triggers an expensive agentic step, so **"never process the
    same PR twice" is the only thing bounding spend.** A state-machine bug that re-admits an

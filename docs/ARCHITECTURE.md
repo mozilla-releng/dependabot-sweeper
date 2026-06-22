@@ -2,105 +2,218 @@
 
 ## Overview
 
-Dependabot Sweeper runs as a **periodic cron worker** against a GitHub repo's open dependabot
-PRs. Each cycle it triages every open PR, taking one of three actions: approve it silently,
-drive an implementation agent to fix code breakage and open a replacement PR, or flag it for
-human attention with a concise explanation. The cycle repeats; the PR is the only UI.
+Dependabot Sweeper is a **persistent service** that automates the review and
+remediation of dependabot PRs in a GitHub repo using Claude. It runs as a
+long-lived process with an internal scan ticker — not a system cron job.
+
+On each scan, it triages every open dependabot PR and takes one of three
+actions: approve it, drive an automated fix pipeline that opens a replacement
+PR, or flag it for human attention with a concise explanation.
 
 ## Execution model
 
-The worker is **level-triggered and stateless across cycles**. Each cycle reads current GitHub
-state and decides what to do now — it does not rely on what it observed in a prior cycle.
-A SQLite database records outcomes (per PR, per head SHA) so the worker can skip PRs it has
-already acted on without re-querying them. PRs with unsettled CI are skipped and revisited on
-the next cycle.
+The binary exposes three subcommands (`cmd/dependabot-sweeper/`):
 
-This model has two hard consequences:
+- **`worker`** — the persistent daemon. Runs an immediate first scan, then
+  repeats on an in-process `time.Ticker` (`internal/service/service.go`,
+  default `--interval=30m`, deployed at `10m`). A scan-mutex guard
+  (`scanMu.TryLock`) drops a tick if the previous scan is still running —
+  scans are strictly sequential. Deployed as a `restart: unless-stopped`
+  Docker container.
+- **`web`** — the operator dashboard. A separate, concurrent read-only
+  HTTP process that reads the same SQLite database the worker writes.
+- **`review`** — a one-shot analysis of a single PR. Store-less; uses
+  embedded SHA markers in the PR body for idempotency. Intended for
+  interactive use and integration testing.
 
-1. **Idempotency is mandatory.** Re-running a cycle must not re-post reviews or comments.
-   The worker checks whether it has already produced the equivalent outcome for the current
-   head SHA before acting on any PR.
-2. **The PR is the only user-facing output.** There is no email, no Slack message, no
-   notification outside the PR itself. A "flag for human" disposition is rendered as a single
-   sticky status comment on the PR (`<!-- sweeper:status -->`), created once and edited in
-   place on subsequent cycles — never duplicated.
+The scanner is **level-triggered**: each scan re-reads current GitHub state
+and decides what to do now — it does not carry per-PR memory in process
+state. The SQLite database is the memory.
 
-## Multi-agent pipeline
+## State
 
-Each PR that needs code changes goes through a gated pipeline:
+The tool is **stateful across scans**. `internal/sqlitestore` maintains a
+SQLite database (WAL mode, file on a persistent bind-mounted disk) with three
+main tables:
+
+| Table | Contents |
+|---|---|
+| `pr_progress` | Per-PR stage, CI summary, session/worktree/branch metadata, analysis blob, replacement-PR linkage, and `pipeline_checkpoint` (resumable-pipeline JSON) |
+| `stage_events` | Append-only timeline of stage transitions per PR |
+| `created_prs` | Reap-exempt record of every replacement PR the tool created (Q14) |
+| `scan_status` | Single-row scan timing written by the worker, read by the web process |
+
+The `(pr_number, head_sha)` pair is the idempotency key: a PR whose head SHA
+matches a recorded terminal outcome is skipped on the next scan with zero LLM
+calls. The `pipeline_checkpoint` column persists mid-flight pipeline state so
+a later scan can resume where a prior one yielded. The database survives
+restarts; the worker applies schema migrations idempotently on startup.
+
+## User interfaces
+
+There are two distinct audiences, each with their own interface:
+
+**Operator (the person running the tool):**
+- **Web dashboard** (`internal/web/`) — a Svelte SPA served at `--listen-addr`
+  (default `localhost:8080`). Endpoints: `/api/v1/prs` (PR list), per-PR agent
+  log tail (`/api/v1/prs/{n}/log`, last 200 lines of the JSONL transcript),
+  `/api/v1/status` (scan timing), `/api/v1/events` (Server-Sent Events for
+  live updates), `/api/v1/workflow` (decision graph JSON). Intentionally
+  read-only and unauthenticated. The `web` process and `worker` run
+  concurrently against the same SQLite file (writer vs. reader WAL modes).
+
+**Repo maintainers (the people whose PRs are acted on):**
+- **GitHub PR** — the only channel to maintainers. A sticky status comment
+  (`<!-- sweeper:status -->`) is created once and edited in place on
+  subsequent scans (via `UpsertStatusComment`). On a "flag for human"
+  disposition, the concise reason appears there. The replacement PR body
+  carries the agent's justification; the original dependabot PR is closed
+  with a brief comment linking to the replacement.
+
+No email, no Slack, no notifications outside the PR. (The operator dashboard
+is an observability surface, not a channel to maintainers — see PRINCIPLES.md.)
+
+## The implementation pipeline
+
+Each PR that needs code changes goes through a gated pipeline driven by the
+Go orchestrator (`internal/orchestrator/`). The orchestrator is a **Go
+program**, not an LLM agent. It launches `claude` CLI subprocesses.
 
 ```
-Orchestrator
+Orchestrator (Go)
   │
-  ├─ Analyser (Claude API)
-  │    Reads: PR diff, upstream changelog, codebase usage grep, CI status
-  │    Produces: structured JSON — recommendation + breaking changes + guidance
+  ├─ Combined agent (claude subprocess — internal/agent/)
+  │    Reads: PR diff, brief with metadata + environment context
+  │    The agent fetches upstream data, changelog, CI, and codebase
+  │    context itself ("agent empowerment principle")
+  │    Produces: structured JSON verdict — recommend / needs_changes /
+  │              flag_human / gave_up
   │
-  ├─ Implementation worker (Claude Code subprocess)
-  │    Receives: analysis brief + target branch
-  │    Does: fix → commit → push → open draft PR → exit
-  │    Constraint: bounded by time cap + per-PR spend cap
+  │  On "needs_changes":
   │
-  ├─ CI gate (orchestrator-owned, not worker-owned)
-  │    Polls until CI settles; resumes worker with failure logs if needed
-  │    Bounded by MaxImplIterations + MaxImplTime
+  ├─ Implementation pipeline (internal/implementation/)
+  │    Phase 0: manual rebase if the dependabot branch is behind base
+  │    Turn 1: worker subprocess (claude) fixes code, commits, pushes,
+  │            opens draft replacement PR, exits
   │
-  └─ Reviewer (Claude API)
-       Reads: original analysis + implementation diff + CI status
-       Produces: approve or request_changes
+  ├─ CI gate (orchestrator-owned)
+  │    Fetches branch CI once per scan; yields (InProgress) if pending —
+  │    the scan thread is freed and the next scan resumes from checkpoint.
+  │    If CI fails on a required check: worker is resumed with failure logs.
+  │    Bounded by MaxImplIterations (CI-fix turns) + MaxImplTime (wall clock).
+  │
+  ├─ Reviewer (claude subprocess — internal/reviewer/)
+  │    When CI is acceptable, reviews the diff.
+  │    approve → finalize; request_changes → resume worker (bounded retries).
+  │
+  └─ Finalize
+       Curate/squash commits (curate agent subprocess), force-push,
+       re-verify post-squash CI, un-draft the replacement PR,
+       close the original dependabot PR.
 ```
 
-The worker is a **bounded turn**: it fixes, pushes, opens a draft PR, and exits. It never
-waits for CI. The orchestrator owns the CI gate entirely — it polls, evaluates, and resumes
-the worker session with failure context if CI fails on a bump-related check. This separation
-ensures the worker's context stays focused on the code problem and the orchestrator's context
-stays focused on the pipeline logic.
+**Key design points:**
 
-On resume, the same worker session is continued (via `claude --resume <session-id>`), so the
-worker accumulates context across CI-fix iterations without starting from scratch.
+- The worker is a **bounded turn**: fix → push → open draft PR → exit. It
+  never polls CI. The orchestrator owns the CI gate entirely.
+- On CI-fix resume, the **same Claude session is continued** via
+  `claude --resume <session-id>`, so the worker accumulates context across
+  turns without starting from scratch.
+- The pipeline is **level-triggered**: when CI is pending the pipeline
+  persists a checkpoint and returns. The *next scan* resumes it. No thread
+  blocks waiting for CI; a scan's wall-clock time is bounded by actual work,
+  not idle CI waiting.
+- The default analysis path is the **combined subprocess agent** —
+  a single `claude` invocation that analyses the PR and decides the action
+  in one step. The separate SDK-based `internal/analyser` package is a
+  legacy rollback path, reached only via `--legacy-analyser`.
 
 ## CI perception
 
-The worker reads CI exclusively via the **generic GitHub Checks API** — no provider-specific
-APIs (no Taskcluster queue, no GitHub Actions job-logs API). This makes the tool work for any
-CI provider that reports check runs to GitHub.
+The tool reads CI exclusively via the **GitHub Checks API** — no
+provider-specific APIs (no Taskcluster queue, no GitHub Actions log API).
+This makes it provider-agnostic. For failing checks it reads
+`output.summary` + `output.text` from the check run.
 
-For failing checks, the tool reads `output.summary` + `output.text` from the check run. In
-practice this carries enough log tail (typically 8+ KB) to diagnose the failure. Provider-
-specific log access (richer logs from Taskcluster, GHA, etc.) is a future capability layer,
-not part of the core tool.
+**Settledness** — a PR's CI is settled when every check is either terminal
+(completed with any conclusion) or stale (pending longer than
+`--ci-staleness`, default 12h, measured from `CreatedAt`). Unsettled PRs are
+skipped and revisited on the next scan.
 
-**Settledness** — a PR's CI is settled when every check is either terminal (completed with any
-conclusion) or stale (pending for longer than the staleness threshold, default 12h). The tool
-uses the check's `StartedAt` timestamp as the staleness clock, falling back to the PR's head
-commit timestamp when no check timestamp is available. A PR with unsettled CI is skipped and
-revisited on the next cycle; the early-failure-while-siblings-still-run case is handled
-correctly (the PR is not triaged prematurely).
+**AcceptableGiven** — the success criterion (`CIStatus.AcceptableGiven` in
+`internal/models/`) applies **required-checks gating** (Q7): when branch
+protection defines a required-checks set, only checks in that set can block.
+If no required set is readable, it falls back to gating on all checks.
 
-**AcceptableGiven** — the tool distinguishes between failures that are the tool's
-responsibility and those that are not:
-- Failures on the base branch (pre-existing before the bump) → not blocking
-- Failures in the `--ignore-check` list → not blocking
-- Stale checks in the `--ignore-check` list → not blocking
-- All other failures → blocking
+The **only** suppression on the production path is the operator
+`--ignore-check` list: named checks are never blocking, regardless of their
+result. This is the escape hatch for known structural failures (e.g.
+`CodeQL`, `Dependabot auto-merge`). The implementation agent is expected to
+fix even pre-existing required-check failures — if it cannot, the pipeline
+gives up after `--max-impl-iterations` / `--max-no-progress-iterations`.
 
-The same `AcceptableGiven` function governs both the pre-implementation routing decision
-(should the tool attempt a fix at all?) and the post-implementation gate (is CI good enough
-to open the replacement PR?).
+(The `AcceptableGiven` function accepts a `baseFailures` map for legacy
+base-branch-failure suppression, but the production path passes `nil` — this
+was a deliberate Q3 decision. The only site that passes a non-nil value is
+the `--legacy-analyser` routing path.)
 
 ## Decision graph
 
-The full PR disposition state machine is specified declaratively in `internal/workflow/` as a
-Go package. The spec asserts that its stage node IDs match `models.AllPRStages` — adding a
-stage without updating the spec fails `go test`. The `/api/v1/workflow` endpoint exposes the
-spec as JSON; the dashboard's `/how-it-works` route renders it as an interactive SVG.
+The full PR disposition state machine is declared in `internal/workflow/` as
+a static Go graph. `workflow.ValidateTransition` guards every stage write in
+the store — adding a stage constant without updating the spec fails `go test`.
 
-## Idempotency (current state and planned)
+The `/api/v1/workflow` endpoint exposes the graph as JSON. The dashboard's
+`/how-it-works` route renders it as an interactive SVG.
 
-**Implemented:** outcomes are recorded in SQLite per `(pr_number, head_sha)`. On the next
-cycle, a PR whose head SHA matches a recorded terminal outcome is skipped with zero LLM calls.
+## Idempotency
 
-**Planned (Spec B):** full idempotent PR *writing* — upsert-not-duplicate for reviews and
-sticky status comments, keyed to head SHA + disposition. The `<!-- sweeper:status -->` marker
-mechanism is in place; the full create-vs-edit semantics across all dispositions are not yet
-implemented.
+**Implemented:**
+- `(pr_number, head_sha)` outcomes in SQLite — a PR at the same head SHA
+  skips with zero LLM calls.
+- `UpsertStatusComment` — the sticky status comment is created once and
+  edited in place; never duplicated.
+- `created_prs` table (Q14) — the tool's own replacement PRs are permanently
+  excluded from re-ingestion as fresh dependabot PRs.
+- `pipeline_checkpoint` — a mid-flight pipeline yields and resumes rather
+  than starting over, preserving session continuity and spend.
+
+## Package layout
+
+| Path | Role |
+|---|---|
+| `cmd/dependabot-sweeper/` | Binary entrypoint; subcommand dispatch (`review` / `worker` / `web`) |
+| `internal/service/` | Persistent daemon: internal ticker, single-scan overlap guard, scan-status sink |
+| `internal/orchestrator/` | Per-scan PR processing loop: gates, routing, finalize, bare-clone management |
+| `internal/agent/` | Combined analyse-and-decide `claude` subprocess + verdict parsing |
+| `internal/implementation/` | Full fix lifecycle: clone/branch/rebase, worker turns, resumable CI-fix/review state machine, curate/squash, checkpoints |
+| `internal/reviewer/` | Independent reviewer `claude` subprocess; structured JSON verdict |
+| `internal/analyser/` | **Legacy** SDK-based analyser; only with `--legacy-analyser` |
+| `internal/models/` | Shared types; CI evaluation logic (`Settled`, `AcceptableGiven`), stage constants, verdict/result structs |
+| `internal/github/` | GitHub API client: fetch PRs, check runs, required checks, log tails, PR mutations |
+| `internal/sqlitestore/` | SQLite-backed progress store, schema/migrations, SSE Notifier, scan-status reader/writer |
+| `internal/progress/` | Storage abstraction interfaces (`Writer`/`Reader`/`ReadWriter`/`Notifier`); imports only `models` to avoid cycles |
+| `internal/web/` | Read-only HTTP server: embedded Svelte SPA, JSON+SSE endpoints, per-PR log tail, workflow graph |
+| `internal/workflow/` | Static decision graph and transition validator |
+| `internal/config/` | Environment + `.env` config loading, functional-option overrides, validation |
+| `internal/llmutil/` | Shared helpers for parsing LLM text output (`ExtractJSON`, `FirstText`, `Truncated`) |
+
+## End-to-end: one PR
+
+1. **Scan** — `Service.runOneScan` → `Orchestrator.Run` → `github.GetDependabotPRs`. Drop the tool's own replacement PRs (`created_prs` check). Reap closed PRs from the store. Prepopulate "pending" rows for new PRs.
+
+2. **Per-PR gates** (`processPR`) — record current versions + CI; skip `BumpUnknown`; staleness/supersession check; resume in-flight checkpoint if valid; skip if CI state is unknown; CI settledness gate; `(pr, head_sha)` idempotency skip.
+
+3. **Combined agent** — `runCombinedAgent`: clone workdir, run `claude` subprocess with a brief built from PR metadata. Returns a structured verdict. Routing:
+   - `recommend` → re-gate required CI, upsert sticky comment. Never a native GitHub APPROVE.
+   - `flag_human` → upsert concise-reason sticky comment.
+   - `gave_up` → post silent draft, record terminal outcome.
+   - `needs_changes` → implementation pipeline.
+
+4. **Implementation pipeline** — `Pipeline.Run`: Phase 0 rebase if behind base; clone + branch; pin a session UUID; run worker turn 1 (worker pushes and opens a **draft** replacement PR). Hand to `drive()` state machine.
+
+5. **CI-fix loop** — `drive()` phase `awaiting_impl_ci`: fetch branch CI; `AcceptableGiven` check. If pending → `park()` (persist checkpoint, return `InProgress`; scan completes). Next scan: `Resume()` reloads checkpoint, calls `drive()` again. If settled + failing → resume worker with failure logs. Bounded by `MaxImplIterations` / `MaxNoProgressIterations` / `MaxImplTime`.
+
+6. **Review** — when CI acceptable, `reviewer.Review` subprocess. `request_changes` → resume worker (bounded by `MaxReviewRetries`). `approve` → finalize.
+
+7. **Finalize** — curate commits (curate `claude` subprocess), force-push, phase `awaiting_postsquash_ci` (same park/resume loop). On success: `UpdatePRTitle`, `MarkPRReadyForReview`, post justification to PR body, close original dependabot PR with link, record `finalized` + replacement linkage.

@@ -487,7 +487,7 @@ func (o *Orchestrator) processPR(ctx context.Context, pr models.DependabotPR, al
 		}
 	}
 
-	// Step 3: CI settledness gate. As a level-triggered cron we skip a PR whose
+	// Step 3: CI settledness gate. As a level-triggered scan we skip a PR whose
 	// CI is still running and revisit next cycle — but a check that has been
 	// pending past the staleness threshold no longer blocks (it can't hide the
 	// PR forever), and ignored checks aren't waited on at all. Settled() also

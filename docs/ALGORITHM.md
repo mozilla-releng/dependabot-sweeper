@@ -61,7 +61,7 @@ decides whether to merge.
 
 ## Non-negotiable constraints
 
-- **Idempotent — and this is a COST-SAFETY invariant, not just UX.** The tool runs on a cron
+- **Idempotent — and this is a COST-SAFETY invariant, not just UX.** The tool runs on a scan
   cycle. Re-running the same cycle must produce no duplicate comments, reviews, or actions; "no
   change since last cycle" must be a no-op. Critically, under Q10 every engaged PR triggers an
   *expensive agentic step*, so the **only** thing bounding spend is "never process the same PR
@@ -111,7 +111,7 @@ staleness, CI-settled, and already-processed checks all happen *inside* the per-
 not as a pre-filter.
 
 Titles that don't parse as a known bump format are still processed (with bump type `unknown`)
-rather than dropped — in an unattended cron loop, silently losing a PR is worse than analysing
+rather than dropped — in an unattended scan loop, silently losing a PR is worse than analysing
 one off its diff.
 
 **Two gates together determine in-scope PRs.** The author filter is the primary gate. A second,

@@ -163,33 +163,96 @@ func validateThinkingBudget(flag string, v int) error {
 // Option is a functional option for overriding Config defaults.
 type Option func(*Config)
 
-func WithMaxImplTime(v int) Option           { return func(c *Config) { c.MaxImplTime = v } }
-func WithMaxImplBudget(v float64) Option     { return func(c *Config) { c.MaxImplBudget = v } }
-func WithMaxReviewRetries(v int) Option      { return func(c *Config) { c.MaxReviewRetries = v } }
-func WithImplModel(v string) Option          { return func(c *Config) { c.ImplModel = v } }
+// WithMaxImplTime sets the maximum wall-clock seconds the implementation
+// pipeline may run per PR (default 21600 = 6 h). Cost is bounded by
+// WithMaxImplBudget first; this is a hard outer cap.
+func WithMaxImplTime(v int) Option { return func(c *Config) { c.MaxImplTime = v } }
+
+// WithMaxImplBudget sets the maximum USD spend per PR across all
+// implementation agent turns (default 50.00). This is the primary cost guard.
+func WithMaxImplBudget(v float64) Option { return func(c *Config) { c.MaxImplBudget = v } }
+
+// WithMaxReviewRetries sets how many times the implementation worker may be
+// resumed after a reviewer request_changes verdict (default 1).
+func WithMaxReviewRetries(v int) Option { return func(c *Config) { c.MaxReviewRetries = v } }
+
+// WithImplModel sets the Claude model passed to the implementation worker
+// subprocess (empty = Claude Code default).
+func WithImplModel(v string) Option { return func(c *Config) { c.ImplModel = v } }
+
+// WithCombinedAgentModel sets the Claude model for the combined
+// analyse-and-decide agent subprocess (empty = Claude Code default).
 func WithCombinedAgentModel(v string) Option { return func(c *Config) { c.CombinedAgentModel = v } }
+
+// WithCombinedAgentBudget sets the max USD spend per PR for the combined
+// analyse-and-decide agent (default 20.00).
 func WithCombinedAgentBudget(v float64) Option {
 	return func(c *Config) { c.CombinedAgentBudget = v }
 }
+
+// WithAnalyserModel sets the Claude model for the legacy SDK-based analyser,
+// used only with --legacy-analyser (default claude-sonnet-4-6).
 func WithAnalyserModel(v string) Option { return func(c *Config) { c.AnalyserModel = v } }
+
+// WithAnalyserThinkingBudget sets the extended-thinking token budget for the
+// legacy SDK-based analyser (0 = disabled; minimum non-zero value is 1024).
 func WithAnalyserThinkingBudget(v int) Option {
 	return func(c *Config) { c.AnalyserThinkingBudget = v }
 }
+
+// WithReviewerModel sets the Claude model for the reviewer subprocess
+// (default claude-sonnet-4-6).
 func WithReviewerModel(v string) Option { return func(c *Config) { c.ReviewerModel = v } }
+
+// WithReviewerThinkingBudget sets the extended-thinking token budget for the
+// reviewer (0 = disabled; minimum non-zero value is 1024).
 func WithReviewerThinkingBudget(v int) Option {
 	return func(c *Config) { c.ReviewerThinkingBudget = v }
 }
+
+// WithIgnoreChecks sets CI check names that are never blocking in
+// AcceptableGiven, regardless of their result — for known structural or
+// pre-existing failures that the tool should not attempt to fix. Repeatable;
+// deployed with e.g. "CodeQL", "Dependabot auto-merge".
 func WithIgnoreChecks(v []string) Option { return func(c *Config) { c.IgnoreChecks = v } }
-func WithConcurrency(v int) Option       { return func(c *Config) { c.Concurrency = v } }
+
+// WithConcurrency sets the maximum number of PRs processed concurrently
+// within a single scan (default 20).
+func WithConcurrency(v int) Option { return func(c *Config) { c.Concurrency = v } }
+
+// WithMaxImplIterations sets the maximum number of CI-fix resume turns per
+// review cycle, not counting the initial implementation turn (default 30).
 func WithMaxImplIterations(n int) Option { return func(c *Config) { c.MaxImplIterations = n } }
+
+// WithMaxNoProgressIterations sets how many consecutive settled CI-fix turns
+// with no reduction in the failing-check count are allowed before the
+// pipeline gives up (Q12; default 8).
 func WithMaxNoProgressIterations(n int) Option {
 	return func(c *Config) { c.MaxNoProgressIterations = n }
 }
-func WithCIVerifyMaxWait(v int) Option       { return func(c *Config) { c.CIVerifyMaxWait = v } }
+
+// WithCIVerifyMaxWait sets the maximum seconds to wait for CI to settle after
+// an implementation push before timing out (default 5400 = 90 min). Under the
+// level-triggered pipeline this is a per-scan cap, not a blocking wait.
+func WithCIVerifyMaxWait(v int) Option { return func(c *Config) { c.CIVerifyMaxWait = v } }
+
+// WithCIStaleness sets the duration after which a still-pending check is
+// considered stale and no longer blocks settledness (default 12h). Stale
+// checks in the --ignore-check list are silently bypassed; stale blocking
+// checks surface as "stuck" in diagnostic output.
 func WithCIStaleness(v time.Duration) Option { return func(c *Config) { c.CIStaleness = v } }
-func WithBotName(v string) Option            { return func(c *Config) { c.BotName = v } }
-func WithBotEmail(v string) Option           { return func(c *Config) { c.BotEmail = v } }
-func WithDataDir(v string) Option            { return func(c *Config) { c.DataDir = v } }
+
+// WithBotName sets the git committer name used for implementation commits
+// (default "dependabot-helper").
+func WithBotName(v string) Option { return func(c *Config) { c.BotName = v } }
+
+// WithBotEmail sets the git committer email used for implementation commits.
+func WithBotEmail(v string) Option { return func(c *Config) { c.BotEmail = v } }
+
+// WithDataDir sets the root directory for persistent data: per-PR working
+// directories and the base bare clone. Defaults to $SWEEPER_DATA_DIR or
+// ~/.local/share/dependabot-sweeper.
+func WithDataDir(v string) Option { return func(c *Config) { c.DataDir = v } }
 
 // loadDotenv loads a .env file from the current directory, if present.
 // Existing environment variables are not overridden.

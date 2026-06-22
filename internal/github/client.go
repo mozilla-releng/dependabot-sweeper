@@ -159,7 +159,7 @@ func (c *Client) GetDependabotPRs(ctx context.Context) ([]models.DependabotPR, e
 					bump = maxGroupedBump(groupedUpdates)
 				} else {
 					// Unparseable title from an accepted bot author. Do NOT drop it
-					// silently — in an unattended cron loop that loses the PR with no
+					// silently — in an unattended scan loop that loses the PR with no
 					// signal. Process it with an unknown bump and the title as the
 					// display name; the analyser still works off the diff/body, and it
 					// stays visible on the dashboard.
@@ -453,11 +453,11 @@ func (c *Client) GetUpstreamInfo(ctx context.Context, packageName, ecosystem, ol
 // the capability keeps that guarantee structural, not just convention.
 
 // statusCommentMarker is embedded in the bot's sticky status comment so it
-// can be found and updated on subsequent cron cycles rather than re-posted.
+// can be found and updated on subsequent scan cycles rather than re-posted.
 const statusCommentMarker = "<!-- sweeper:status -->"
 
 // shaMarkerPrefix / Suffix wrap the head SHA embedded in terminal status
-// comments. A subsequent cron run finds the SHA and skips re-analysis when
+// comments. A subsequent scan finds the SHA and skips re-analysis when
 // nothing has changed on the PR (idempotency — no unnecessary edits).
 const shaMarkerPrefix = "<!-- sweeper:sha:"
 const shaMarkerSuffix = " -->"

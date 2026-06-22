@@ -73,8 +73,23 @@ else
     echo "  ✓ Metadata updated (future VM reboots will use this image)."
 fi
 
+# Sync compose.yaml to the VM. Without this the deploy only updates the image —
+# changes to the compose (e.g. --interval, --ignore-check, --concurrency) would
+# silently never take effect, leaving the running worker on stale config. The VM
+# reads /opt/sweeper/compose.yaml, so we scp to a tmp path and the restart command
+# (which runs as root) moves it into place before `compose up`.
+echo "▶ Syncing compose.yaml to $VM_NAME..."
+if [ "$DRY_RUN" = true ]; then
+    echo "  [dry-run] gcloud compute scp $REPO_ROOT/deploy/compose.yaml $VM_NAME:/tmp/sweeper-compose.yaml"
+else
+    gcloud compute scp "$REPO_ROOT/deploy/compose.yaml" "$VM_NAME:/tmp/sweeper-compose.yaml" \
+        --zone="$ZONE" --tunnel-through-iap
+    echo "  ✓ compose.yaml uploaded."
+fi
+
 echo "▶ Restarting services on $VM_NAME (zone $ZONE)..."
 RESTART_CMD="
+    sudo cp /tmp/sweeper-compose.yaml /opt/sweeper/compose.yaml &&
     gcloud auth print-access-token | sudo docker login -u oauth2accesstoken --password-stdin ${IMAGE%%/*} &&
     sudo docker pull ${IMAGE} &&
     REPO=\$(curl -sf -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/attributes/sweeper-repo) &&
@@ -84,7 +99,7 @@ RESTART_CMD="
 "
 
 if [ "$DRY_RUN" = true ]; then
-    echo "  [dry-run] SSH to $VM_NAME: docker login + pull + compose up"
+    echo "  [dry-run] SSH to $VM_NAME: cp compose + docker login + pull + compose up"
 else
     gcloud compute ssh "$VM_NAME" \
         --zone="$ZONE" \
